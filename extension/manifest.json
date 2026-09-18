@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Jev Voice MVP",
+  "version": "0.1.0",
+  "description": "押して話すと、現在のタブを目的まで操作します。ローカル Jev サーバーが必要です。",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "debugger",
+    "offscreen",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8767/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Jev Voice の設定を開く"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

@@ -76,6 +76,8 @@ class Browser:
             time.sleep(0.02)
 
     def call(self, method, **params):
+        if getattr(self, "transport", None):
+            return self.transport(method, **params)
         return cdp(method, session_id=self.session, **params)
 
     def evaluate(self, expression):
@@ -123,7 +125,8 @@ class Browser:
         for attempt in range(10):
             try:
                 return browser_operation(
-                    {"operation": "observe", "session": self.session, "screenshot": screenshot}
+                    {"operation": "observe", "session": self.session, "screenshot": screenshot,
+                     **({"transport": self.transport} if getattr(self, "transport", None) else {})}
                 )
             except StalePage:
                 if attempt == 9:
@@ -156,7 +159,11 @@ class Browser:
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
             time.sleep(0.1)
-        result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
+        result = browser_operation({
+            "operation": "act", "session": self.session, "action": action, "text": text,
+            "owned": getattr(self, "owned", True),
+            **({"transport": self.transport} if getattr(self, "transport", None) else {}),
+        })
         self.after_input = action if action["kind"] != "wait" else None
         if "proxy_for" in action:
             self.after_input = {**action, "prior_options": [
@@ -180,6 +187,8 @@ def browser_operation(request):
     session = request["session"]
 
     def call(method, **params):
+        if request.get("transport"):
+            return request["transport"](method, **params)
         return cdp(method, session_id=session, **params)
 
     def evaluate(expression):
@@ -200,7 +209,9 @@ def browser_operation(request):
         action = request["action"]
         kind = action["kind"]
         if kind == "scroll":
-            call("Input.dispatchMouseEvent", type="mouseWheel", x=550, y=650, deltaX=0, deltaY=action["delta"])
+            size = evaluate("({width:innerWidth,height:innerHeight})")
+            call("Input.dispatchMouseEvent", type="mouseWheel", x=size["width"] / 2,
+                 y=size["height"] / 2, deltaX=0, deltaY=action["delta"])
         elif kind != "wait":
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
@@ -215,7 +226,7 @@ def browser_operation(request):
               if (hit.reason) return reject(hit.reason);
               const {x,y}=hit;
               // Keep ordinary new-tab links in the agent-owned tab; arbitrary popups remain unsupported.
-              if (action.kind==='click' && e.tagName==='A' &&
+              if (action.owned && action.kind==='click' && e.tagName==='A' &&
                   (e.getAttribute('target') || document.querySelector('base')?.target)==='_blank')
                 e.setAttribute('target','_self');
               if (action.kind==='select') {
@@ -235,7 +246,7 @@ def browser_operation(request):
                 if (action.kind==='select') return reject(started ? 'execution_exception' : 'validation_exception');
                 throw _;
               }
-            })(""" + json.dumps(action) + ")")
+            })(""" + json.dumps({**action, "owned": request.get("owned", True)}) + ")")
             if kind == "select":
                 if not isinstance(target, dict) or target.get("ok") is not True:
                     if isinstance(target, dict) and target.get("ok") is False:

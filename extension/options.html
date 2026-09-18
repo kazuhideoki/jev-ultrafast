@@ -1,0 +1,12 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><title>Jev Voice 設定</title>
+<style>body{font:16px system-ui;max-width:680px;margin:60px auto;padding:24px;color:#18372e;background:#f5f8f6}input{width:100%;padding:12px;box-sizing:border-box}button{padding:10px 16px;margin:12px 8px 12px 0}p{line-height:1.8}#status{white-space:pre-wrap}</style>
+<h1>Jev Voice の設定</h1><p>この画面で、拡張とローカルサーバーを接続します。次回からは Brave のツールバーにある Jev Voice アイコンをクリックすると開けます。</p><ol><li>ローカルサーバー <code>jev-voice</code> を起動します。</li><li>プロジェクト内の <code>.voice-token</code> ファイルを開き、中の文字列をコピーします。</li><li>下の「ペアリングトークン」欄に貼り付け、「保存」を押します。</li><li>「マイクを許可・確認」を押し、ブラウザの許可画面で許可します。</li></ol><p>ここに保存するのは接続用トークンです。OpenAI の API キーは入力しません。</p>
+<label>ペアリングトークン<input id="token" type="password" autocomplete="off"></label>
+<p><label>使用するマイク <select id="device"><option value="">システムの既定のマイク</option></select></label><br><label>入力音量 <meter id="level" min="0" max="1" value="0"></meter></label></p>
+<button id="save">保存</button><button id="microphone">マイクを許可・確認</button>
+<p id="status" role="status"></p>
+<p><b>直近の指示</b><br><span id="transcript" style="white-space:pre-wrap;overflow-wrap:anywhere">まだありません</span></p>
+<p><b>⌘ + Shift + I を押して話す → 離して実行</b><br>通常の Web ページ内にフォーカスがあるときに使えます。初回や準備に時間がかかる場合は「録音中」の表示を待って話してください。</p>
+<p>Esc・タブ切り替えで停止。操作済みの変更は取り消しません。終了後もタブは残ります。</p>
+<p>音声は OpenAI に、表示中のページ情報は TypeSafe と入力用モデルに送信されます。API キーはローカルサーバーに保持します。iframe・Shadow DOM・新規タブへの操作継続は MVP の対象外です。</p>
+<script src="options.js"></script></html>
