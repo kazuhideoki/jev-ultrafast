@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
+from browser_harness import _ipc as harness_ipc
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
@@ -19,7 +21,27 @@ class StalePage(ValueError):
 
 class Browser:
     def __init__(self, url):
-        ensure_daemon()
+        try:
+            ensure_daemon()
+        except RuntimeError as error:
+            # Harness 0.1.13 can hide a missing DevTools port behind a generic startup error.
+            if "didn't come up" in str(error):
+                try:
+                    log = harness_ipc.log_path(os.environ.get("BU_NAME", "default"))
+                    with open(log, "rb") as stream:
+                        stream.seek(0, 2)
+                        stream.seek(max(0, stream.tell() - 8192))
+                        detail = stream.read().decode("utf-8", errors="replace")
+                except OSError:
+                    detail = ""
+                if detail.strip().splitlines() and "DevToolsActivePort not found" in detail.strip().splitlines()[-1]:
+                    raise RuntimeError(
+                        "Browser remote debugging is not enabled. In Brave, open "
+                        "brave://inspect/#remote-debugging (Chrome: chrome://inspect/#remote-debugging), "
+                        "enable 'Allow remote debugging for this browser instance', then rerun "
+                        "and approve the connection prompt. This grants access to the browser profile."
+                    ) from error
+            raise
         self.target = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
         self.call("Emulation.setDeviceMetricsOverride", width=1120, height=780, deviceScaleFactor=1, mobile=False)
@@ -146,9 +168,19 @@ def browser_operation(request):
               if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
                   !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
-              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              if (!e.contains(document.elementFromPoint(x,y))) return null;
+              // Inline links can wrap blocks: their bounding-box center may be empty space.
+              // Try rendered fragments, but still require a hit on the observed node itself.
+              const rects=[e.getBoundingClientRect(),...e.getClientRects(),
+                ...[...e.querySelectorAll('*')].slice(0,100).flatMap(n=>[...n.getClientRects()])];
+              const point=rects.map(r=>({x:r.x+r.width/2,y:r.y+r.height/2,w:r.width,h:r.height}))
+                .find(p=>p.w>0 && p.h>0 && p.x>=0 && p.y>=0 && p.x<innerWidth && p.y<innerHeight &&
+                  e.contains(document.elementFromPoint(p.x,p.y)));
+              if (!point) return null;
+              const {x,y}=point;
+              // Keep ordinary new-tab links in the agent-owned tab; arbitrary popups remain unsupported.
+              if (action.kind==='click' && e.tagName==='A' &&
+                  (e.getAttribute('target') || document.querySelector('base')?.target)==='_blank')
+                e.setAttribute('target','_self');
               if (action.kind==='select') {
                 if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
                     !o.disabled && !o.closest('optgroup[disabled]'))) return null;

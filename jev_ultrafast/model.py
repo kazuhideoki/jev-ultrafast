@@ -4,6 +4,7 @@ import json
 import math
 import os
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -166,13 +167,17 @@ def field_text(context):
     reasoning = {"thinking": {"type": "disabled"}} if "api.deepseek.com/" in base else {"reasoning": {"effort": "low"}}
     if os.environ.get("TEXT_MODEL_REASONING") == "none":
         reasoning = {"reasoning": {"enabled": False}}
+    token_limit = {"max_tokens": 1024}
+    if urlparse(base).hostname == "api.openai.com":
+        reasoning = {"reasoning_effort": os.environ.get("TEXT_MODEL_REASONING", "none")}
+        token_limit = {"max_completion_tokens": 1024}
     started = time.perf_counter()
     result = post_json(
         base + "/chat/completions",
         key,
         {
             "model": model,
-            "max_tokens": 1024,
+            **token_limit,
             "response_format": {"type": "json_object"},
             **reasoning,
             "messages": [

@@ -124,6 +124,18 @@ def main():
         assert value == "Generated", repr(value)
         assert any(a.get("role") == "option" for a in page["actions"])
         passed.append("real text input waits for asynchronous combobox suggestions")
+        browser.evaluate("document.body.innerHTML=" + repr("""
+          <span><a href="#destination" target="_blank" id="fragmented"
+            onclick="event.preventDefault();window.clickedTarget=this.target;window.linkClicks=(window.linkClicks||0)+1">
+            <h3 style="margin:0">Fragmented link</h3><br><span>Destination description</span>
+          </a></span>
+        """))
+        page = browser.observe(screenshot=False)
+        link = next(a for a in page["actions"] if a.get("role") == "link")
+        browser.act(link, page)
+        assert browser.evaluate("window.linkClicks") == 1
+        assert browser.evaluate("window.clickedTarget") == "_self"
+        passed.append("fragmented link receives one click with its target set to the owned tab")
         browser.call("Page.navigate", url="about:blank")
         assert not browser.fresh(page, field)
         passed.append("navigation invalidates the old document")

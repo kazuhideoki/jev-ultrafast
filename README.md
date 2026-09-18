@@ -59,9 +59,20 @@ uv run jev
 
 Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. The inspector shows numbered elements, operation probabilities, target probabilities, and executed actions. **Choose next** pauses before execution.
 
-Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted.
+Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. In Brave, open `brave://inspect/#remote-debugging` and enable **Allow remote debugging for this browser instance**. In Chrome, use `chrome://inspect/#remote-debugging`. Rerun the command and allow the connection prompt. This grants Browser Harness access to that browser profile. If startup reports `DevToolsActivePort not found`, this setting is missing.
 
-`TEXT_MODEL_API_KEY` is an OpenRouter key in the example configuration. The current demo uses `inception/mercury-2.5` with reasoning disabled. Gemini, GLM, and DeepSeek can also use the OpenAI-compatible text helper; configure the appropriate model, endpoint, and reasoning setting.
+The example configuration uses [OpenAI GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) for field text. Set these values in `.env` and restart `uv run jev` after changes:
+
+```dotenv
+TEXT_MODEL_API_KEY=
+TEXT_MODEL_BASE_URL=https://api.openai.com/v1
+TEXT_MODEL=gpt-5.6-luna
+TEXT_MODEL_REASONING=none
+```
+
+Fill `TEXT_MODEL_API_KEY` with your OpenAI API key. `TYPESAFE_API_KEY` is still required for operation and target choices. Luna only generates field text. `TEXT_MODEL_REASONING` is sent as OpenAI's `reasoning_effort`; Luna supports `none`, `low`, `medium`, `high`, `xhigh`, and `max`. Start with `none` for short field values. The 1,024-token completion budget includes reasoning tokens, so higher effort can exhaust it before producing field text.
+
+Requests to `api.openai.com` use `max_completion_tokens` and `reasoning_effort`. Other endpoints retain the existing request format. To use the original OpenRouter configuration, set `TEXT_MODEL_BASE_URL=https://openrouter.ai/api/v1`, `TEXT_MODEL=inception/mercury-2.5`, and `TEXT_MODEL_REASONING=none`, with an OpenRouter key. The recorded demo and performance measurements below used that original configuration, not Luna.
 
 ## Use the library
 
@@ -119,7 +130,7 @@ In six alternating runs with identical models and settings, both versions passed
 
 The same policy opened the requested Wikipedia article in **2.798 s** and passed a local hotel search/filter task in **1.896 s**. Runs, failures, source hashes, and measurement boundaries are in [performance.md](docs/performance.md).
 
-A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Shadow roots, frames, canvas, uploads, pop-up tabs, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
+A `DONE` choice still requires independent outcome verification. The DOM reader handles common HTML and ARIA controls, not the full accessible-name specification. Ordinary links with `target="_blank"` open in the agent-owned tab. Shadow roots, frames, canvas, uploads, JavaScript popups, nested scrolling, and arbitrary keyboard widgets remain outside this MVP. Owned tabs share the existing Chrome profile.
 
 ## Development
 
