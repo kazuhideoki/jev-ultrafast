@@ -151,3 +151,90 @@ Tests are offline. `uv run python scripts/check_guards.py` checks real controls 
 ---
 
 [Browser Use](https://github.com/browser-use/browser-use) · [Browser Harness](https://github.com/browser-use/browser-harness) · [TypeSafe speculative fan-out](https://docs.typesafe.ai/patterns/fan-out)
+
+## Voice extension MVP (Brave / Chromium)
+
+The voice extension runs the existing goal-based loop on the tab where recording
+started. It supports both a single instruction and multiple steps across navigation
+in that same tab. It leaves the tab open when the run stops.
+
+```bash
+uv sync
+uv run jev-voice
+```
+
+Run from this repository so the server can load `.env`. Transcription uses
+`gpt-transcribe`. Set `OPENAI_API_KEY`, or reuse `TEXT_MODEL_API_KEY` when
+`TEXT_MODEL_BASE_URL` points to `https://api.openai.com/v1`. The existing
+`TYPESAFE_API_KEY` and text-model settings are still needed. API keys stay in Python.
+The server listens only on `127.0.0.1:8767`; it accepts extension origins and requires
+a separate random pairing token, generated in the ignored `.voice-token` file.
+
+1. Open `brave://extensions`, enable Developer mode, and **Load unpacked** → select
+   this repository's `extension` directory.
+2. Click the **Jev Voice toolbar icon** to open its settings, paste the contents of `.voice-token` into **ペアリングトークン**,
+   and click **保存**. This is the pairing token, not an OpenAI API key.
+3. Select a microphone if needed, click **マイクを許可・確認**, and speak during the
+   five-second input-level check. Click **保存** after changing the microphone, then
+   return to a normal web page.
+
+| Operation | Trigger |
+| --- | --- |
+| Hold to speak, release to execute | **⌘ + Shift + I** while the web page has focus |
+| Stop a running task | **Esc** in the web page |
+| Open pairing and microphone settings | Click the Jev Voice extension icon |
+| Cancel on tab switch | Automatic; the run never follows focus to a different tab |
+
+The confirmed transcript appears beneath the status as **指示：…**, including for
+15 seconds after stopping. Settings also shows **直近の指示** for the current browser
+session. Starting another recording clears the on-page transcript until the next
+instruction is recognized.
+
+Wait for **録音中** before speaking; microphone startup is not instantaneous. The
+hold shortcut is implemented by a content script, so it doesn't work in the address
+bar, browser-internal pages, or cross-origin frames. There is only one recording
+shortcut, implemented as a page key listener rather than a browser command. Page blur
+or navigation cancels a recording; navigation after committing an instruction is
+allowed. Recording is limited to 30 seconds and a run to 120 seconds / the existing
+60-action budget. Cancellation prevents subsequent commands; it cannot undo an
+already-dispatched click or submission.
+
+Audio is sent incrementally over an authenticated local WebSocket, then upstream
+to OpenAI. Releasing the key flushes the final audio chunk and commits the turn;
+`gpt-transcribe` starts transcription after commit. The confirmed transcript becomes
+the original goal with no extra planning model. The existing TypeSafe operation and
+operation-specific target selection, TYPE_TEXT helper, stale guards, and execution
+history remain in use. The extension uses `chrome.debugger` for browser input, so
+Chromium displays a debugging notice while attached. No remote-debugging browser
+flag or Browser Harness connection is needed for the extension.
+
+Visible page information goes to TypeSafe and, when typing, the configured text
+model. The extension doesn't receive provider credentials. It stores only its local
+pairing token and selected microphone, plus the latest status and transcript in
+browser-session memory; the voice bridge doesn't save recordings or
+traces. Failed runs log only the stage, error code, audio duration/peak level, and
+transcript length; they do not log audio or transcript contents. Goal completion is a model decision, so the final notification asks the user
+to check the outcome instead of claiming independently verified success.
+
+Scope: ordinary HTML / ARIA controls and same-tab HTTP(S) navigation, including
+cross-origin navigation. Iframes, shadow DOM, canvas, file uploads, nested scrolling,
+and continuing in a newly opened tab are outside this MVP. Borrowed tabs keep their
+viewport and link targets unchanged. If a link activates a new tab, the original run
+stops rather than moving to it. Opening DevTools or revoking debugger access can
+interrupt the run; uncertain input is never automatically repeated.
+
+### Voice verification
+
+```bash
+uv run pytest
+uv run python scripts/check_voice_extension.py
+```
+
+The latter launches **isolated headless Brave** with the real unpacked extension,
+a fake microphone, a local fixture, and offline transcription/model substitutes.
+It checks actual page navigation, text input, application of the value, the end
+notification, preservation of the tab, early key release, Esc cancellation, and
+cancellation during model latency when switching tabs. It doesn't touch a personal browser
+profile or call paid APIs. Real-microphone Japanese recognition, live provider
+availability, and end-to-end latency must be evaluated separately; existing flight
+demo timing does not include voice input.
