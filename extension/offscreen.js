@@ -1,7 +1,7 @@
 let current;
 const notify = (session, event) => chrome.runtime.sendMessage({target: 'background', runId: session.id, ...event});
 function transmit(session, event) {
-  if (session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify(event));
+  if (session.authenticated && session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify(event));
   else session.pending.push(event);
 }
 async function release(session) {
@@ -28,22 +28,56 @@ async function start(message) {
   if (current) throw new Error('Already running');
   const session = current = {id: message.runId, pending: [], recording: false, committed: false};
   try {
+    const clientNonce = crypto.randomUUID();
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(message.token),
+      {name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify']);
+    if (current !== session) return;
+    const proofBytes = (role, nonce) => new TextEncoder().encode(`jev-voice-v1:${role}:${clientNonce}:${nonce}`);
     session.ws = new WebSocket('ws://127.0.0.1:8767');
-    session.ws.onopen = () => {
-      session.ws.send(JSON.stringify({token: message.token}));
-      for (const event of session.pending) session.ws.send(JSON.stringify(event));
-      session.pending = [];
-    };
+    let handshake = 'challenge';
+    let incoming = Promise.resolve();
+    session.ws.onopen = () => session.ws.send(JSON.stringify({type: 'hello', nonce: clientNonce}));
     session.ws.onmessage = event => {
-      const data = JSON.parse(event.data);
-      if (current !== session || data.type === 'ready') return;
-      void notify(session, data);
+      incoming = incoming.then(async () => {
+        if (current !== session) return;
+        const data = JSON.parse(event.data);
+        if (handshake === 'challenge') {
+          if (data.type !== 'challenge' || !/^[a-f0-9]{64}$/.test(data.nonce || '') ||
+              !/^[a-f0-9]{64}$/.test(data.proof || '')) throw new Error('Invalid server proof');
+          const signature = Uint8Array.from(data.proof.match(/../g), hex => parseInt(hex, 16));
+          if (!await crypto.subtle.verify('HMAC', key, signature, proofBytes('server', data.nonce))) {
+            throw new Error('Invalid server proof');
+          }
+          const signed = await crypto.subtle.sign('HMAC', key, proofBytes('client', data.nonce));
+          if (current !== session) return;
+          const proof = [...new Uint8Array(signed)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+          session.ws.send(JSON.stringify({type: 'authenticate', proof}));
+          handshake = 'ready';
+          return;
+        }
+        if (handshake === 'ready') {
+          if (data.type !== 'ready') throw new Error('Pairing not completed');
+          session.authenticated = true;
+          handshake = 'authenticated';
+          for (const pending of session.pending) transmit(session, pending);
+          session.pending = [];
+          return;
+        }
+        await notify(session, data);
+      }).catch(async () => {
+        if (current !== session) return;
+        current = null;
+        await release(session); session.ws.close();
+        await notify(session, {type: 'failed', text: 'サーバーを認証できません。接続先とペアリング設定を確認してください。'});
+      });
     };
     session.ws.onclose = () => {
-      if (current === session) {
-        current = null; void release(session);
-        void notify(session, {type: 'failed', text: 'サーバー接続が終了しました。接続・ペアリング設定を確認してください。'});
-      }
+      // Process the final result queued before close before reporting a lost connection.
+      incoming = incoming.finally(async () => {
+        if (current !== session) return;
+        current = null; await release(session);
+        await notify(session, {type: 'failed', text: 'サーバー接続が終了しました。接続・ペアリング設定を確認してください。'});
+      });
     };
     session.stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, ...(message.deviceId ? {deviceId: {exact: message.deviceId}} : {})}, video: false});
     if (current !== session) { await release(session); return; }

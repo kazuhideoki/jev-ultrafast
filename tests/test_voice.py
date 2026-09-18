@@ -61,8 +61,9 @@ def test_borrowed_browser_does_not_close_tab():
     assert browser.owned is False
 
 
-@pytest.mark.parametrize("transcript,code", [("設定を開いて", None), ("", "transcript_empty"),
-                                          ("x" * 2001, "transcript_long")])
+@pytest.mark.parametrize(
+    "transcript,code", [("設定を開いて", None), ("", "transcript_empty"), ("x" * 2001, "transcript_long")]
+)
 def test_transcription_commits_after_all_audio(monkeypatch, transcript, code):
     bridge = bridge_without_reader()
     bridge.events = queue.Queue()
@@ -128,3 +129,24 @@ def test_auth_failure_cannot_start_model(monkeypatch):
 
     monkeypatch.setattr(voice, "transcribe", lambda *_: pytest.fail("API must not run"))
     voice.handle(Socket(), "correct")
+
+
+def test_mutual_pairing_proves_both_roles_without_sending_token():
+    token = "local-secret"
+
+    class Socket:
+        def __init__(self):
+            self.challenge = None
+
+        def recv(self, **_):
+            if not self.challenge:
+                return json.dumps({"nonce": "a" * 36})
+            return json.dumps({"proof": voice.pairing_proof(token, "client", "a" * 36, self.challenge["nonce"])})
+
+        def send(self, raw):
+            assert token not in raw
+            self.challenge = json.loads(raw)
+            assert self.challenge["proof"] == voice.pairing_proof(token, "server", "a" * 36, self.challenge["nonce"])
+
+    assert voice.authenticate(Socket(), token)
+    assert voice.pairing_proof(token, "client", "a", "b") != voice.pairing_proof(token, "server", "a", "b")

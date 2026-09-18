@@ -11,7 +11,10 @@ async function display(text, terminal = false) {
   await chrome.tabs.sendMessage(current.tabId, {type: 'display', text, terminal, transcript: current.transcript || '', recording: !terminal && current.phase === 'recording'}).catch(() => {});
 }
 async function ensureOffscreen() {
-  if (await chrome.offscreen.hasDocument()) return;
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [chrome.runtime.getURL('offscreen.html')],
+  });
+  if (contexts.length) return;
   creating ||= chrome.offscreen.createDocument({url: 'offscreen.html', reasons: ['USER_MEDIA'], justification: 'Record a push-to-talk browser instruction'});
   try { await creating; } finally { creating = null; }
 }
@@ -88,7 +91,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
             throw new Error('Stopped');
           }
         }
-        if (run !== current || current.finishing || !await active(current.tabId)) throw new Error('Stopped');
+        const stillActive = await active(current.tabId);
+        if (run !== current || current.finishing || !stillActive) throw new Error('Stopped');
         const result = await chrome.debugger.sendCommand({tabId: current.tabId}, message.method, message.params);
         if (run === current) await offscreen({type: 'rpc_result', runId: current.id, id: message.id, result});
       } catch (_) {

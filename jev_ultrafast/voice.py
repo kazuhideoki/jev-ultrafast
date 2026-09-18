@@ -1,6 +1,8 @@
 """Authenticated loopback bridge for the voice extension. No API keys leave Python."""
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import queue
@@ -54,6 +56,33 @@ def openai_key():
     if not key:
         raise ValueError("Configure OPENAI_API_KEY or the existing OpenAI TEXT_MODEL_API_KEY in .env")
     return key
+
+
+def pairing_proof(token, role, client_nonce, server_nonce):
+    message = f"jev-voice-v1:{role}:{client_nonce}:{server_nonce}".encode()
+    return hmac.new(token.encode(), message, hashlib.sha256).hexdigest()
+
+
+def authenticate(ws, token):
+    hello = json.loads(ws.recv(timeout=5))
+    client_nonce = hello.get("nonce", "") if isinstance(hello, dict) else ""
+    if not isinstance(client_nonce, str) or not re.fullmatch(r"[a-f0-9-]{36}", client_nonce):
+        return False
+    server_nonce = secrets.token_hex(32)
+    ws.send(
+        json.dumps(
+            {
+                "type": "challenge",
+                "nonce": server_nonce,
+                "proof": pairing_proof(token, "server", client_nonce, server_nonce),
+            }
+        )
+    )
+    answer = json.loads(ws.recv(timeout=5))
+    proof = answer.get("proof", "") if isinstance(answer, dict) else ""
+    return isinstance(proof, str) and secrets.compare_digest(
+        proof, pairing_proof(token, "client", client_nonce, server_nonce)
+    )
 
 
 class Bridge:
@@ -199,8 +228,7 @@ def handle(ws, token):
     bridge = None
     stage = "接続"
     try:
-        auth = json.loads(ws.recv(timeout=5))
-        if not isinstance(auth, dict) or not secrets.compare_digest(str(auth.get("token", "")), token):
+        if not authenticate(ws, token):
             ws.close(1008, "Pairing required")
             return
         bridge = Bridge(ws)

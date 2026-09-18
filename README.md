@@ -169,6 +169,9 @@ Run from this repository so the server can load `.env`. Transcription uses
 `TYPESAFE_API_KEY` and text-model settings are still needed. API keys stay in Python.
 The server listens only on `127.0.0.1:8767`; it accepts extension origins and requires
 a separate random pairing token, generated in the ignored `.voice-token` file.
+Client and server prove possession using nonce-bound HMAC challenges; the token
+is never sent over the socket, and audio/RPC forwarding waits for authentication.
+The loopback transport assumes a trusted local OS; it is not intended for remote hosting.
 
 1. Open `brave://extensions`, enable Developer mode, and **Load unpacked** → select
    this repository's `extension` directory.
