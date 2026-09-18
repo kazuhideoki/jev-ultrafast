@@ -21,10 +21,11 @@ def main():
         page = browser.observe(screenshot=False)
         action = next(a for a in page["actions"] if a["label"] == "Continue")
         browser.evaluate("document.querySelector('#target').style.transform='translateX(200px)'")
-        assert browser.fresh(page), "Movement should use fresh geometry, not another model call"
+        assert browser.fresh(page, action), "Movement should use fresh geometry, not another model call"
         browser.act(action, page)
         assert browser.evaluate("window.clicks") == 1
         passed.append("moving target clicked at its current location")
+        page = browser.observe(screenshot=False)
 
         browser.evaluate("document.querySelector('#outside').textContent='Updated outside the viewport'")
         assert browser.fresh(page)
@@ -57,7 +58,7 @@ def main():
         browser.evaluate("const cover=document.createElement('div'); "
                          "cover.style.cssText='position:fixed;inset:0;z-index:9999;background:white'; "
                          "document.body.append(cover)")
-        assert browser.fresh(page)
+        assert not browser.fresh(page), "Covered controls must disappear from the offered actions"
         try:
             browser.act(action, page)
         except (RuntimeError, StalePage):

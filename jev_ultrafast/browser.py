@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import time
@@ -12,11 +13,31 @@ from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
+ACTIONABILITY = Path(__file__).with_name("actionability.js").read_text()
+READ_STATE = Path(__file__).with_name("snapshot.js").read_text().replace("__JEV_ACTIONABILITY__", ACTIONABILITY)
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
+
+
+class DropdownUncertain(RuntimeError):
+    """A dropdown may have changed; never automatically retry it."""
+
+
+def dropdown_failure(action, reason, started):
+    diagnostic = {
+        "kind": "select", "target": action.get("target_label", action.get("label", ""))[:200],
+        "option": action.get("option_label", "")[:200],
+        "reason": reason, "mutation_started": started,
+        "phase": "preflight" if started is False else "execution",
+    }
+    logging.getLogger(__name__).warning("Dropdown failure: %s", json.dumps(diagnostic, ensure_ascii=False))
+    error = (StalePage if started is False else DropdownUncertain)(
+        "Dropdown execution: " + json.dumps(diagnostic, ensure_ascii=False)
+    )
+    error.diagnostic = diagnostic
+    return error
 
 
 class Browser:
@@ -73,16 +94,19 @@ class Browser:
                     expression="""(action => new Promise(resolve => {
                       const field=window.__jevFast?.nodes.get(action.node);
                       const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
+                      const dropdown=action.proxy_for!==undefined;
                       let frames=0, stopped=false;
                       const finish=()=>{stopped=true;resolve()};
-                      setTimeout(finish,autocomplete ? 200 : 50);
+                      setTimeout(finish,dropdown ? 600 : autocomplete ? 200 : 50);
                       const ready=()=>{
                         if (stopped) return;
                         const ids=(field?.getAttribute('aria-controls')||field?.getAttribute('aria-owns')||'')
                           .split(/\\s+/).filter(Boolean);
                         const roots=ids.length ? ids.map(id=>document.getElementById(id)).filter(Boolean) : [document];
-                        const options=roots.flatMap(root=>[...root.querySelectorAll('[role="option"]')]);
-                        if (++frames>=2 && (!autocomplete || options.some(e=>{
+                        const options=roots.flatMap(root=>[
+                          ...root.querySelectorAll('[role="option"],[role="menuitem"]')]);
+                        if (++frames>=2 && (!(autocomplete || dropdown) || options.some(e=>{
+                          if (dropdown && action.prior_options.includes(window.__jevFast?.ids.get(e))) return false;
                           const r=e.getBoundingClientRect();
                           return r.width && r.height && r.bottom>0 && r.top<innerHeight &&
                             e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
@@ -120,12 +144,24 @@ class Browser:
         return self.evaluate(MARKER) == page["marker"]
 
     def act(self, action, page, text=None):
-        if not self.fresh(page, action):
+        try:
+            fresh = self.fresh(page, action)
+        except StalePage:
+            if action["kind"] == "select":
+                raise dropdown_failure(action, "document_changed", False) from None
+            raise
+        if not fresh:
+            if action["kind"] == "select":
+                raise dropdown_failure(action, "page_or_target_changed", False)
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
             time.sleep(0.1)
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
         self.after_input = action if action["kind"] != "wait" else None
+        if "proxy_for" in action:
+            self.after_input = {**action, "prior_options": [
+                a["node"] for a in page["actions"] if a.get("role") in {"option", "menuitem"}
+            ]}
         return result
 
     def close(self):
@@ -147,10 +183,16 @@ def browser_operation(request):
         return cdp(method, session_id=session, **params)
 
     def evaluate(expression):
-        result = call("Runtime.evaluate", expression=expression, returnByValue=True)
+        selecting = operation == "act" and request["action"]["kind"] == "select"
+        try:
+            result = call("Runtime.evaluate", expression=expression, returnByValue=True)
+        except Exception:
+            if selecting:
+                raise dropdown_failure(request["action"], "evaluation_response_lost", None) from None
+            raise
         if result.get("exceptionDetails"):
-            if operation == "act" and request["action"]["kind"] == "select":
-                raise RuntimeError("Dropdown execution was interrupted; inspect before retrying.")
+            if selecting:
+                raise dropdown_failure(request["action"], "evaluation_interrupted", None)
             raise StalePage("Document changed during evaluation")
         return result.get("result", {}).get("value")
 
@@ -164,35 +206,42 @@ def browser_operation(request):
                 raise ValueError("Invalid observed node")
             # Code-owned node IDs refer to actual observed elements, never model-generated selectors.
             target = evaluate("""(action => {
+              const {resolveTarget}=""" + ACTIONABILITY + """;
+              let started=false;
+              const reject=reason=>action.kind==='select' ? {ok:false,started,reason} : null;
+              try {
               const e=window.__jevFast?.nodes.get(action.node);
-              if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
-                  !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
-              if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
-              // Inline links can wrap blocks: their bounding-box center may be empty space.
-              // Try rendered fragments, but still require a hit on the observed node itself.
-              const rects=[e.getBoundingClientRect(),...e.getClientRects(),
-                ...[...e.querySelectorAll('*')].slice(0,100).flatMap(n=>[...n.getClientRects()])];
-              const point=rects.map(r=>({x:r.x+r.width/2,y:r.y+r.height/2,w:r.width,h:r.height}))
-                .find(p=>p.w>0 && p.h>0 && p.x>=0 && p.y>=0 && p.x<innerWidth && p.y<innerHeight &&
-                  e.contains(document.elementFromPoint(p.x,p.y)));
-              if (!point) return null;
-              const {x,y}=point;
+              const hit=resolveTarget(e,action);
+              if (hit.reason) return reject(hit.reason);
+              const {x,y}=hit;
               // Keep ordinary new-tab links in the agent-owned tab; arbitrary popups remain unsupported.
               if (action.kind==='click' && e.tagName==='A' &&
                   (e.getAttribute('target') || document.querySelector('base')?.target)==='_blank')
                 e.setAttribute('target','_self');
               if (action.kind==='select') {
-                if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
-                    !o.disabled && !o.closest('optgroup[disabled]'))) return null;
-                e.value=action.value;
+                if (e.tagName!=='SELECT') return reject('target_not_select');
+                const option=window.__jevFast.nodes.get(action.option_node);
+                if (!option?.isConnected || ![...e.options].includes(option)) return reject('option_missing');
+                if (option.value!==action.value || option.label!==action.option_label)
+                  return reject('option_changed');
+                if (option.disabled || option.closest('optgroup[disabled]')) return reject('option_disabled');
+                started=true;
+                e.selectedIndex=option.index;
                 e.dispatchEvent(new Event('input',{bubbles:true}));
                 e.dispatchEvent(new Event('change',{bubbles:true}));
               }
-              return {x,y};
+              return {x,y,ok:true,started};
+              } catch (_) {
+                if (action.kind==='select') return reject(started ? 'execution_exception' : 'validation_exception');
+                throw _;
+              }
             })(""" + json.dumps(action) + ")")
-            if target is None:
-                if kind == "select":
-                    raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")
+            if kind == "select":
+                if not isinstance(target, dict) or target.get("ok") is not True:
+                    if isinstance(target, dict) and target.get("ok") is False:
+                        raise dropdown_failure(action, target["reason"], target["started"])
+                    raise dropdown_failure(action, "execution_not_confirmed", None)
+            elif target is None:
                 raise StalePage("Target changed or is covered. Observe again.")
             if kind != "select":
                 x, y = target["x"], target["y"]

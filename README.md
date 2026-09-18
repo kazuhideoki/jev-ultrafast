@@ -42,7 +42,7 @@ page → element table → operation                 │
                    small LLM → text → browser
 ```
 
-Target questions are speculative. If the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**. Each target head contains only compatible elements. Native dropdown choices carry an observed element/option index.
+Target questions are speculative. If the operation is `CLICK`, only `click_target` can execute. Two decisions, **one network round trip**. Each target head contains only compatible elements. Native dropdown choices carry an observed element/option index. For a decorated native dropdown, a matching visible surface is offered as `CLICK`; its menu choices are observed after opening.
 
 There are no site-specific action scripts or prepared field strings in the policy. The Flights example supplies a goal and independently verifies the outcome. The screenshot renderer adds labels afterward; it does not drive the browser.
 
@@ -103,10 +103,12 @@ uv run --env-file .env python examples/run.py \
 - **One request per decision cycle.** Operation and target heads share the same observed state.
 - **No screenshots in the default agent loop.** Jev consumes structured state. The inspector opts into screenshots; the video uses a separate continuous screencast.
 - **One browser call per snapshot.** Read visible controls, their names, values, and text atomically. Keep references to the actual DOM nodes.
+- **Offer executable controls.** Observation and execution share visibility, disabled-state and hit-test checks. A decorated dropdown surface is offered only when its local position, interaction attributes, label and current value match the backing native control; unrelated overlays remain blocked.
 - **Validate the selected target.** Clicks check the document, form values, target, and nearby context. Animation alone does not force another prediction. Resolve current geometry and reject covered controls before input.
-- **Wait for useful state.** After typing into a combobox, wait for visible suggestions, capped at 200 ms. Other interactions get at most two animation frames or 50 ms. These reads happen after execution is logged.
+- **Wait for useful state.** After typing into a combobox, wait for visible suggestions, capped at 200 ms. After opening a decorated dropdown, wait for newly visible options, capped at 600 ms. Other interactions get at most two animation frames or 50 ms. These reads happen after execution is logged.
 - **Keep hidden tabs rendering.** Focus emulation prevents background animation throttling without switching Chrome's visible tab.
 - **Send visible text.** Offscreen article bodies and footers do not fill the model context.
+- **Recover before dropdown input.** A rejected target or option triggers observation and a new decision; five consecutive stale cycles stop with the last reason. If a dropdown mutation starts or its response is lost, stop without retrying. Diagnostics include the target/option labels, reason and mutation phase, without raw option values or page contents.
 - **Reuse an interrupted text request.** A generated value survives a stale-page retry only if the entire text-helper input is unchanged.
 
 Every executed target is resolved from an observed node. The executor rechecks page freshness and click occlusion. Model output never becomes selectors, coordinates, shell commands, or executable JavaScript. Text-helper output must parse as a small JSON object before typing.
@@ -117,6 +119,7 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | --- | --- |
 | [agent.py](jev_ultrafast/agent.py) | The complete loop and text-helper handoff |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
+| [actionability.js](jev_ultrafast/actionability.js) | Shared target checks and decorated dropdown recognition |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
@@ -139,10 +142,11 @@ uv run ruff check .
 uv run pytest
 node --check jev_ultrafast/static/app.js
 node --check jev_ultrafast/snapshot.js
+node --check jev_ultrafast/actionability.js
 uv build
 ```
 
-Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
+Tests are offline. `uv run python scripts/check_guards.py` checks real controls in a local browser without model calls. `uv run python scripts/check_dropdown.py` exercises dropdown races and prevents duplicate execution after uncertain results. `uv run python scripts/check_surface.py` checks decorated dropdowns and delayed menus. See [dropdown recovery evidence](docs/dropdown-recovery.md) and [surface-click implementation results](docs/dropdown-surface.md). Live examples and recording scripts make paid API calls. `scripts/record_flights.py <new-folder>` captures original browser timestamps; `scripts/render_demo.py <recording-folder>` renders that verified run at 1× and crops out the Google account strip. Credentials and raw traces stay ignored.
 
 ---
 

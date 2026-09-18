@@ -318,3 +318,96 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
     runner.state["browser"].act.assert_not_called()
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_dropdown_structured_failure(monkeypatch, caplog, started):
+    import jev_ultrafast.browser as browser
+
+    cdp = Mock(return_value={"result": {"value": {
+        "ok": False, "started": started, "reason": "execution_exception" if started else "target_covered",
+    }}})
+    monkeypatch.setattr(browser, "cdp", cdp)
+    with pytest.raises(browser.DropdownUncertain if started else StalePage) as error:
+        browser_operation({"operation": "act", "session": "test", "action": {
+            "id": "e1", "kind": "select", "node": 1, "value": "private-option-value",
+            "target_label": "Category", "option_label": "Design",
+        }})
+    assert error.value.diagnostic["mutation_started"] is started
+    assert "Category" in caplog.text and "Design" in caplog.text
+    assert "private-option-value" not in caplog.text
+    assert cdp.call_count == 1
+
+
+def test_dropdown_transport_loss_is_not_stale(monkeypatch):
+    import jev_ultrafast.browser as browser
+
+    cdp = Mock(side_effect=TimeoutError("transport private data"))
+    monkeypatch.setattr(browser, "cdp", cdp)
+    with pytest.raises(browser.DropdownUncertain, match="evaluation_response_lost") as error:
+        browser_operation({"operation": "act", "session": "test", "action": {
+            "id": "e1", "kind": "select", "node": 1,
+        }})
+    assert error.value.diagnostic["mutation_started"] is None
+    assert "private data" not in str(error.value)
+    cdp.assert_called_once()
+
+
+def test_stale_tick_redecides_and_recovers(runner, monkeypatch):
+    choose = Mock(side_effect=[decision("e3"), decision("wait")])
+    monkeypatch.setattr(loop, "choose", choose)
+    runner.state["browser"].act.side_effect = [StalePage("target_covered"), None]
+    runner.command("tick")
+    assert runner.state["history"] == []
+    assert runner.state["decision"] is None
+    runner.state["browser"].observe.assert_called_once()
+    runner.command("tick")
+    assert choose.call_count == 2
+    assert runner.state["history"][0]["choice"] == "wait"
+    assert runner.state["stale_retries"] == 0
+    assert runner.state["error"] is None
+
+
+def test_stale_tick_has_bounded_recovery_with_last_reason(runner, monkeypatch):
+    monkeypatch.setattr(loop, "choose", Mock(return_value=decision("e3")))
+    runner.state["browser"].act.side_effect = StalePage("target_covered")
+    states = list(runner.run())
+    assert len(states) == loop.MAX_STALE_RETRIES
+    assert states[-1]["status"] == "blocked"
+    assert "target_covered" in states[-1]["error"]
+    assert runner.state["history"] == []
+
+
+def test_uncertain_tick_stops_without_observation_or_reexecution(runner, monkeypatch):
+    from jev_ultrafast.browser import dropdown_failure
+
+    monkeypatch.setattr(loop, "choose", Mock(return_value=decision("e3")))
+    runner.state["browser"].act.side_effect = dropdown_failure({}, "execution_not_confirmed", None)
+    states = list(runner.run())
+    assert len(states) == 1 and states[0]["status"] == "blocked"
+    assert states[0]["failures"][0]["mutation_started"] is None
+    assert states[0]["history"] == []
+    assert list(runner.run()) == []
+    runner.state["browser"].act.assert_called_once()
+    runner.state["browser"].observe.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["tick", "predict", "act"])
+def test_stopped_run_cannot_restart_even_if_freshness_raises(runner, command):
+    runner.state["status"] = "blocked"
+    runner.state["browser"].fresh.side_effect = StalePage("navigating")
+    with pytest.raises(ValueError, match="has stopped"):
+        runner.command(command)
+    runner.state["browser"].fresh.assert_not_called()
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["status"] == "blocked"
+
+
+def test_reobservation_staleness_is_also_bounded(runner, monkeypatch):
+    monkeypatch.setattr(loop, "choose", Mock(return_value=decision("e3")))
+    runner.state["browser"].act.side_effect = StalePage("target_covered")
+    runner.state["browser"].observe.side_effect = StalePage("navigating")
+    states = list(runner.run())
+    assert len(states) == loop.MAX_STALE_RETRIES
+    assert states[-1]["status"] == "blocked"
+    assert "target_covered" in states[-1]["error"]

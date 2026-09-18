@@ -41,24 +41,37 @@
     }
     return null;
   };
+  const {surfaceFor,resolveTarget}=__JEV_ACTIONABILITY__;
+  const proxies=new Map();
+  for (const select of document.querySelectorAll('select')) {
+    const surface=surfaceFor(select);
+    if (surface) proxies.set(surface,select);
+  }
+  const observedName=e=>proxies.has(e) ? e.innerText.trim() : name(e);
+  const observedRole=e=>role(e) || (proxies.has(e) ? 'button' : null);
   cache.pageKey=()=>[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
       .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly])];
   cache.guard=e=>{
-    if (!e?.isConnected || !visible(e)) return null;
+    if (!e?.isConnected || (!proxies.has(e) && !visible(e))) return null;
+    if (proxies.has(e) && surfaceFor(proxies.get(e))!==e) return null;
     const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
-    return [identity(e),role(e),name(e),e.value??null,e.checked??null,e.selectedIndex??null,
+    return [identity(e),observedRole(e),observedName(e),e.value??null,e.checked??null,e.selectedIndex??null,
       e.readOnly??null,e.matches(':disabled'),e.getAttribute('aria-disabled'),
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
   const actions=[];
-  for (const e of document.querySelectorAll(selector)) {
-    if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
-    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
-    if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+  const candidates=[...new Set([...document.querySelectorAll(selector),...proxies.keys()])]
+    .sort((a,b)=>a===b ? 0 : a.compareDocumentPosition(b)&2 ? 1 : -1);
+  for (const e of candidates) {
+    if (!safe(e) || (!proxies.has(e) && !visible(e)) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
+    const r=e.getBoundingClientRect(), rname=observedRole(e);
+    if (!rname) continue;
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
-    const base={node:identity(e),role:rname,label:name(e)||rname,
+    const extra=proxies.has(e) ? {proxy_for:identity(proxies.get(e))} : {};
+    if (resolveTarget(e,extra).reason) continue;
+    const base={...extra,node:identity(e),role:rname,label:observedName(e)||rname,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
@@ -67,7 +80,8 @@
     if (['checkbox','radio'].includes(e.type)) base.checked=String(e.checked);
     if (e.tagName==='SELECT') {
       for (const o of e.options) if (!o.selected && !o.disabled && !o.closest('optgroup[disabled]'))
-        actions.push({...base,kind:'select',value:o.value,
+        actions.push({...base,kind:'select',value:o.value,option_node:identity(o),
+          option_label:o.label,target_label:base.label,
           current_value:[...e.selectedOptions].map(o=>o.label).join(', '),label:base.label+' → '+o.label});
     } else {
       const editable=!e.readOnly && e.getAttribute('aria-readonly')!=='true' &&

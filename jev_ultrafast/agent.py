@@ -4,9 +4,11 @@ import base64
 import time
 from pathlib import Path
 
-from .browser import Browser, StalePage
+from .browser import Browser, DropdownUncertain, StalePage
 from .model import action_space, choose, field_context, field_text
 from .questions import MAX_STEPS
+
+MAX_STALE_RETRIES = 5
 
 
 class Agent:
@@ -30,6 +32,9 @@ class Agent:
             page=page,
             decision=None,
             history=[],
+            failures=[],
+            stale_retries=0,
+            error=None,
             status="ready",
             plan=plan,
             plan_index=0,
@@ -52,14 +57,27 @@ class Agent:
     def command(self, name, body=None):
         body = body or {}
         state = self.state
+        if name in {"tick", "predict", "act"} and state["status"] in {"done", "blocked"}:
+            raise ValueError("This run has stopped. Start a fresh demo.")
         if name == "tick":
             try:
                 self.command("predict", {})
                 return self.command("act", {"fingerprint": state["page"]["fingerprint"]})
-            except StalePage:
+            except StalePage as error:
                 state["decision"] = None
+                state["stale_retries"] = state.get("stale_retries", 0) + 1
+                state["error"] = str(error)
+                state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                if state["stale_retries"] >= MAX_STALE_RETRIES:
+                    state["status"] = "blocked"
+                    state["error"] = f"Stopped after {MAX_STALE_RETRIES} stale retries: {error}"
+                    return self.snapshot()
                 state["status"] = "ready"
-                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                try:
+                    state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                except StalePage:
+                    # The next tick reobserves/redecides; retain the original failure reason.
+                    pass
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
         elif name == "predict":
@@ -70,8 +88,6 @@ class Agent:
             if not state["browser"].fresh(state["page"]):
                 state["page"] = state["browser"].observe(screenshot=self.screenshots)
             state["decision"] = None
-            if state["status"] in {"done", "blocked"}:
-                raise ValueError("This run has stopped. Start a fresh demo.")
             if len(state["decisions"]) >= MAX_STEPS * 2:
                 raise ValueError("Reached the demo's model-call budget")
             state["decision"] = choose(state["page"], state["goal"], state["history"])
@@ -95,6 +111,8 @@ class Agent:
                     state["status"] = "ready"
                     raise StalePage("Page changed since the decision. Choose again.")
                 state["status"] = "done" if selected == "DONE" else "blocked"
+                state["error"] = None
+                state["stale_retries"] = 0
                 state["plan_index"] = int(selected == "DONE")
                 state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
                 return self.snapshot()
@@ -114,7 +132,21 @@ class Agent:
                     self.pending_text = (context, text, helper)
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
             # Browser.act checks freshness immediately before input, including after text generation.
-            state["browser"].act(action, page, text=text)
+            try:
+                state["browser"].act(action, page, text=text)
+            except (StalePage, DropdownUncertain) as error:
+                state.setdefault("failures", []).append({
+                    **getattr(error, "diagnostic", {"reason": str(error), "mutation_started": False}),
+                    "elapsed_ms": round((time.perf_counter() - state["started_at"]) * 1000),
+                })
+                state["error"] = str(error)
+                if isinstance(error, DropdownUncertain):
+                    state["status"] = "blocked"
+                    state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                    return self.snapshot()
+                raise
+            state["stale_retries"] = 0
+            state["error"] = None
             self.pending_text = None
             state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
             # Record execution before observing. A stale post-action observation must not erase the action.

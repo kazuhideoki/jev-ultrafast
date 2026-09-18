@@ -87,6 +87,8 @@ function render() {
     blocked: "Stopped · no supported next action",
   };
   $("status").textContent = labels[state.status] || state.status;
+  $("error").textContent = state.error || "";
+  $("error").hidden = !state.error;
   if (!page) {
     controls();
     return;
