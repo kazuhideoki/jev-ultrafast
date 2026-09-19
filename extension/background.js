@@ -7,8 +7,9 @@ async function display(text, terminal = false) {
   if (!current || (current.finishing && !terminal)) return;
   await chrome.action.setBadgeText({text: terminal ? '' : current.phase === 'recording' ? 'REC' : '…'});
   await chrome.action.setTitle({title: text});
+  current.status = text;
   await chrome.storage.session.set({status: text});
-  await chrome.tabs.sendMessage(current.tabId, {type: 'display', text, terminal, transcript: current.transcript || '', recording: !terminal && current.phase === 'recording'}).catch(() => {});
+  await chrome.tabs.sendMessage(current.tabId, {type: 'display', text, terminal, transcript: current.transcript || '', recording: !terminal && (current.continuous || current.phase === 'recording'), continuous: current.continuous, partial: current.partial || '', goal: current.goal || ''}).catch(() => {});
 }
 async function ensureOffscreen() {
   const contexts = await chrome.runtime.getContexts({
@@ -32,10 +33,10 @@ async function finish(text) {
   if (previous.attached) await chrome.debugger.detach({tabId: previous.tabId}).catch(() => {});
   if (run === previous) run = null;
 }
-async function start(tabId) {
+async function start(tabId, continuous = false) {
   if (run) return;
-  const current = run = {id: crypto.randomUUID(), tabId, phase: 'starting', attached: false};
-  current.timer = setTimeout(() => { if (run === current) void finish('時間上限に達しました'); }, 120000);
+  const current = run = {id: crypto.randomUUID(), tabId, phase: 'starting', attached: false, continuous, epoch: 0, paused: continuous};
+  current.timer = setTimeout(() => { if (run === current) void finish('時間上限に達しました'); }, continuous ? 600000 : 120000);
   try {
     if (!await active(tabId)) throw new Error('対象のタブが切り替わりました');
     const tab = await chrome.tabs.get(tabId);
@@ -46,14 +47,14 @@ async function start(tabId) {
     await display('マイクと接続を準備中…');
     await ensureOffscreen();
     if (run !== current || current.finishing) return;
-    const result = await offscreen({type: 'start', runId: current.id, token, deviceId});
+    const result = await offscreen({type: 'start', runId: current.id, token, deviceId, continuous});
     if (result?.error) throw new Error(result.error);
     current.started = true;
     if (run === current && current.stopRequested) await offscreen({type: 'commit', runId: current.id});
   } catch (error) { if (run === current) await finish(error.message); }
 }
 async function commit() {
-  if (!run || !['starting', 'recording'].includes(run.phase)) return;
+  if (!run || run.continuous || !['starting', 'recording'].includes(run.phase)) return;
   run.phase = 'processing';
   run.stopRequested = true;
   await display('音声を確定中…');
@@ -64,16 +65,32 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   (async () => {
     if (sender.tab) {
       if (sender.frameId !== 0) return;
+      if (message.type === 'toggle-continuous') {
+        if (run?.tabId === sender.tab.id) return finish('連続モードを終了しました');
+        return start(sender.tab.id, true);
+      }
+      if (message.type === 'restore' && run?.tabId === sender.tab.id) return display(run.status || '聞き取り継続');
       if (message.type === 'hold-start') return start(sender.tab.id);
       if (!run || sender.tab.id !== run.tabId) return;
       if (message.type === 'commit') return commit();
-      if (message.type === 'cancel' || (message.type === 'cancel-recording' && ['starting', 'recording'].includes(run.phase))) return finish('中止しました');
+      if (message.type === 'cancel' || (message.type === 'cancel-recording' && !run.continuous && ['starting', 'recording'].includes(run.phase))) return finish('中止しました');
       return;
     }
     if (sender.url !== chrome.runtime.getURL('offscreen.html') || message.runId !== run?.id) return;
     const current = run;
     if (message.type === 'recording') {
-      if (run.phase === 'starting') { run.phase = 'recording'; await display('録音中 · キーを離して実行 / Esc で中止'); }
+      if (run.phase === 'starting') { run.phase = 'recording'; await display(current.continuous ? '連続録音中 · 話の区切りで反映 / Esc で終了' : '録音中 · キーを離して実行 / Esc で中止'); }
+    } else if (message.type === 'gate') {
+      if (message.epoch < current.epoch) return;
+      current.epoch = message.epoch; current.paused = message.paused;
+      if (message.paused) await display('聞き取り中 · 操作を保留しています');
+    } else if (message.type === 'partial') {
+      current.partial = message.text;
+      await display('聞き取り中…');
+    } else if (message.type === 'goal') {
+      current.goal = message.goal ? [message.goal.purpose, ...message.goal.conditions.map(c => c.text)].join(' / ') : '';
+      current.partial = '';
+      await display(message.question || (message.state === 'paused' ? '操作を一時停止 · 聞き取り継続' : '目標を更新しました · 聞き取り継続'));
     } else if (message.type === 'transcript') {
       current.transcript = message.text;
       await chrome.storage.session.set({lastTranscript: message.text});
@@ -93,6 +110,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         }
         const stillActive = await active(current.tabId);
         if (run !== current || current.finishing || !stillActive) throw new Error('Stopped');
+        // Last synchronous check immediately before dispatch; never retry a sent command.
+        if (message.epoch != null && (message.epoch !== current.epoch || current.paused)) {
+          await offscreen({type: 'rpc_result', runId: current.id, id: message.id, error: 'superseded'});
+          return;
+        }
         const result = await chrome.debugger.sendCommand({tabId: current.tabId}, message.method, message.params);
         if (run === current) await offscreen({type: 'rpc_result', runId: current.id, id: message.id, result});
       } catch (_) {

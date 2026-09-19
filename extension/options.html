@@ -6,7 +6,8 @@
 <button id="save">保存</button><button id="microphone">マイクを許可・確認</button>
 <p id="status" role="status"></p>
 <p><b>直近の指示</b><br><span id="transcript" style="white-space:pre-wrap;overflow-wrap:anywhere">まだありません</span></p>
+<p><b>⌘ + Shift + J で連続モード開始・終了</b><br>話の区切りごとに目標へ反映します。操作中も追加・訂正でき、確認待ちの後も聞き取りを続けます（最大10分）。</p>
 <p><b>⌘ + Shift + I を押して話す → 離して実行</b><br>通常の Web ページ内にフォーカスがあるときに使えます。初回や準備に時間がかかる場合は「録音中」の表示を待って話してください。</p>
 <p>Esc・タブ切り替えで停止。操作済みの変更は取り消しません。終了後もタブは残ります。</p>
-<p>音声は OpenAI に、表示中のページ情報は TypeSafe と入力用モデルに送信されます。API キーはローカルサーバーに保持します。iframe・Shadow DOM・新規タブへの操作継続は MVP の対象外です。</p>
+<p>音声は OpenAI に、表示中のページ情報は TypeSafe と入力・意図理解用モデルに送信されます。API キーはローカルサーバーに保持します。iframe・Shadow DOM・新規タブへの操作継続は MVP の対象外です。</p>
 <script src="options.js"></script></html>

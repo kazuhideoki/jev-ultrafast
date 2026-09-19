@@ -3,6 +3,7 @@
 import functools
 import json
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +23,8 @@ TOKEN = "offline-extension-test-" + "x" * 32
 AUDIO_BYTES = 0
 MODEL_CALLS = 0
 MODEL_DELAY = 0
+LIVE_INPUTS = queue.Queue()
+LIVE_ACTIVE = threading.Event()
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -92,7 +95,8 @@ def fake_choose(page, goal, history):
     global MODEL_CALLS
     MODEL_CALLS += 1
     time.sleep(MODEL_DELAY)
-    if "Aurora" in page["text"] and any(h["kind"] == "fill" for h in history):
+    value = "Borealis" if "Borealis" in goal else "Aurora"
+    if value in page["text"] and any(h["kind"] == "fill" for h in history):
         # Input value is separate from visible text; final result must be rendered.
         selected = "DONE"
         operation = "DONE"
@@ -100,7 +104,8 @@ def fake_choose(page, goal, history):
         wanted = (
             ("Settings", "click")
             if "/settings" not in page["url"]
-            else (("Nickname", "fill") if not any(h["kind"] == "fill" for h in history) else ("Apply", "click"))
+            else (("Nickname", "fill") if not any(a.get("value") == value for a in page["actions"])
+                  else ("Apply", "click"))
         )
         action = next(a for a in page["actions"] if wanted[0] in a["label"] and a["kind"] == wanted[1])
         selected = action["id"]
@@ -116,11 +121,45 @@ def fake_choose(page, goal, history):
     }
 
 
+
+def fake_stream(bridge, goals, output):
+    global AUDIO_BYTES
+    LIVE_ACTIVE.set()
+    while not bridge.closed.is_set():
+        try:
+            event = bridge.events.get(timeout=0.02)
+            if event["type"] == "audio":
+                AUDIO_BYTES += len(event["audio"])
+        except queue.Empty:
+            pass
+        try:
+            item, text = LIVE_INPUTS.get_nowait()
+        except queue.Empty:
+            continue
+        with goals.lock:
+            goals.begin(item)
+            bridge.send({"type": "gate", "epoch": goals.epoch, "paused": True})
+        bridge.send({"type": "partial", "text": text})
+        output.put((item, text))
+
+
+def fake_interpret(context):
+    text = context["utterance"]
+    mode = "new" if context["goal"] is None else "amend"
+    if text == "pause":
+        mode = "pause"
+    return {"base_revision": context["base_revision"], "utterance_id": context["utterance_id"],
+            "mode": mode, "purpose": text, "checks": [{"kind": "text", "label": "", "expected": text}],
+            "upsert": [], "remove": [], "question": ""}
+
 def main():
     global MODEL_DELAY
     voice.transcribe = fake_transcribe
+    voice.stream_transcripts = fake_stream
+    voice.interpret = fake_interpret
     agent.choose = fake_choose
-    agent.field_text = lambda _: ("Aurora", {"model": "offline-fixture", "latency_ms": 0, "usage": {}})
+    agent.field_text = lambda context: ("Borealis" if "Borealis" in context["goal"] else "Aurora",
+                                        {"model": "offline-fixture", "latency_ms": 0, "usage": {}})
     fixture = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     threading.Thread(target=fixture.serve_forever, daemon=True).start()
     server = serve(functools.partial(voice.handle, token=TOKEN), "127.0.0.1", 0)
@@ -163,7 +202,8 @@ def main():
             ).json()
             options = CDP(config["webSocketDebuggerUrl"])
             clients.append(options)
-            until(lambda: options.evaluate('typeof chrome.storage !== "undefined"'))
+            until(lambda: options.evaluate('typeof document.querySelector("#save")?.onclick === "function"'))
+            until(lambda: options.evaluate('document.querySelector("#device").options.length > 1'))
             options.evaluate(
                 f'document.querySelector("#token").value={json.dumps(TOKEN)};'
                 'document.querySelector("#save").click()'
@@ -244,6 +284,49 @@ def main():
             assert page.evaluate('document.querySelector("#name").value') == ""
             assert page.evaluate('document.querySelector("#result").textContent') == ""
             print("PASS: early key release, Esc cancellation, tab-switch cancellation during model latency")
+
+            # A continuous session keeps recording across navigation, verified completion and correction.
+            MODEL_DELAY = 0
+            page.call("Page.bringToFront")
+            page.call("Page.navigate", url=f"http://127.0.0.1:{fixture.server_port}/")
+            until(lambda: page.evaluate('document.querySelector("a")?.textContent === "Settings"'))
+            time.sleep(.2)
+            page.call("Input.dispatchKeyEvent", type="keyDown", key="J", code="KeyJ", modifiers=12)
+            page.call("Input.dispatchKeyEvent", type="keyUp", key="J", code="KeyJ", modifiers=12)
+            until(lambda: status_starts("連続録音中"))
+            assert LIVE_ACTIVE.wait(5)
+            LIVE_INPUTS.put(("live-1", "Aurora"))
+            until(lambda: page.evaluate('document.querySelector("#result")?.textContent === "Aurora"'))
+            until(lambda: status_starts("画面上の条件を確認しました"))
+            audio_before = AUDIO_BYTES
+            time.sleep(.3)
+            assert AUDIO_BYTES > audio_before, "Microphone stopped after completion"
+            document = page.call("DOM.getDocument", depth=-1, pierce=True)
+            assert "目標：Aurora" in json.dumps(document, ensure_ascii=False)
+            LIVE_INPUTS.put(("live-2", "Borealis"))
+            until(lambda: page.evaluate('document.querySelector("#result").textContent === "Borealis"'))
+            until(lambda: status_starts("画面上の条件を確認しました"))
+
+            # Correct a delayed old decision; no old value may be applied even briefly.
+            page.evaluate("window.applied=[]; document.querySelector('button').addEventListener('click', "
+                          "()=>window.applied.push(document.querySelector('#name').value))")
+            MODEL_DELAY = .6
+            before = MODEL_CALLS
+            LIVE_INPUTS.put(("live-3", "Aurora"))
+            until(lambda: MODEL_CALLS > before)
+            LIVE_INPUTS.put(("live-4", "Borealis"))
+            until(lambda: status_starts("画面上の条件を確認しました"))
+            assert page.evaluate("window.applied") == []
+            assert page.evaluate('document.querySelector("#name").value') == "Borealis"
+            LIVE_INPUTS.put(("live-5", "pause"))
+            until(lambda: status_starts("操作を一時停止"))
+            before = MODEL_CALLS
+            time.sleep(.7)
+            assert MODEL_CALLS == before
+            page.call("Input.dispatchKeyEvent", type="keyDown", key="Escape", code="Escape")
+            until(lambda: status_starts("中止しました"))
+            print("PASS: continuous recording, navigation restoration, independent DOM verification, "
+                  "post-completion correction, stale decision discarded, spoken pause, Esc; paid API calls: 0")
         finally:
             for client in clients:
                 client.ws.close()

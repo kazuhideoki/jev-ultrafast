@@ -150,3 +150,100 @@ def test_mutual_pairing_proves_both_roles_without_sending_token():
 
     assert voice.authenticate(Socket(), token)
     assert voice.pairing_proof(token, "client", "a", "b") != voice.pairing_proof(token, "server", "a", "b")
+
+
+def test_local_turns_buffer_prefix_and_commit_once_after_silence():
+    import struct
+
+    quiet = bytes(4800)
+    speech = struct.pack('<2400h', *([1200] * 2400))
+    turns = voice.AudioTurns()
+    for _ in range(20):
+        assert turns.feed(quiet) == (False, b'', False)
+    started, chunk, committed = turns.feed(speech)
+    assert started and len(chunk) == 14400 + 4800 and not committed
+    for _ in range(6):
+        assert turns.feed(quiet)[2] is False
+    assert turns.feed(quiet)[2] is True
+    assert turns.feed(quiet) == (False, b'', False)
+    assert turns.feed(speech)[0] is True
+
+
+def test_local_turn_too_long_stops_without_partial_commit():
+    import struct
+
+    speech = struct.pack('<2400h', *([1200] * 2400))
+    turns = voice.AudioTurns()
+    for _ in range(300):
+        assert turns.feed(speech)[2] is False
+    with pytest.raises(voice.VoiceError, match='30秒'):
+        turns.feed(speech)
+
+
+def test_live_transcription_uses_manual_commits_and_maps_local_item(monkeypatch):
+    import struct
+
+    from jev_ultrafast.intent import Goals
+
+    bridge = bridge_without_reader()
+    bridge.events = queue.Queue()
+    bridge.diagnostics = {}
+    goals = Goals()
+    output = queue.Queue()
+    for audio in [struct.pack('<2400h', *([1200] * 2400)), *([bytes(4800)] * 8)]:
+        bridge.events.put({'type': 'audio', 'audio': base64.b64encode(audio).decode()})
+    original_check = bridge.check
+
+    def check():
+        original_check()
+        if not output.empty():
+            raise RuntimeError('fixture complete')
+
+    bridge.check = check
+
+    class Upstream:
+        def __init__(self):
+            self.events = queue.Queue()
+            self.sent = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def close(self):
+            bridge.closed.set()
+
+        def send(self, raw):
+            event = json.loads(raw)
+            self.sent.append(event)
+            if event['type'] == 'input_audio_buffer.commit':
+                self.events.put({'type': 'input_audio_buffer.committed', 'item_id': 'remote-1'})
+                self.events.put({'type': 'conversation.item.input_audio_transcription.completed',
+                                 'item_id': 'remote-1', 'transcript': 'Open settings'})
+
+        def recv(self, timeout):
+            try:
+                return json.dumps(self.events.get(timeout=timeout))
+            except queue.Empty:
+                raise TimeoutError() from None
+
+    upstream = Upstream()
+    monkeypatch.setattr(voice, 'connect', lambda *a, **kw: upstream)
+    monkeypatch.setattr(voice, 'openai_key', lambda: 'offline')
+    with pytest.raises(RuntimeError, match='fixture complete'):
+        voice.stream_transcripts(bridge, goals, output)
+    assert upstream.sent[0]['session']['audio']['input']['turn_detection'] is None
+    assert sum(e['type'] == 'input_audio_buffer.commit' for e in upstream.sent) == 1
+    item, text = output.get_nowait()
+    assert item in goals.pending and item != 'remote-1' and text == 'Open settings'
+    assert goals.epoch == 1
+
+
+def test_transcription_rejection_has_actionable_safe_error():
+    error = voice.transcription_error({'error': {
+        'code': 'invalid_value', 'message': 'secret echoed page text',
+    }})
+    assert error.code == 'transcription_config'
+    assert 'secret' not in str(error)

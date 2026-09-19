@@ -152,19 +152,20 @@ Tests are offline. `uv run python scripts/check_guards.py` checks real controls 
 
 [Browser Use](https://github.com/browser-use/browser-use) · [Browser Harness](https://github.com/browser-use/browser-harness) · [TypeSafe speculative fan-out](https://docs.typesafe.ai/patterns/fan-out)
 
-## Voice extension MVP (Brave / Chromium)
+## Voice extension (Brave / Chromium)
 
-The voice extension runs the existing goal-based loop on the tab where recording
-started. It supports both a single instruction and multiple steps across navigation
-in that same tab. It leaves the tab open when the run stops.
+The voice extension runs the goal-based loop on the tab where recording started.
+Use push-to-talk for a single instruction, or continuous mode to add and correct
+instructions while the browser works. Both support same-tab navigation and leave
+the tab open when stopped.
 
 ```bash
 uv sync
 uv run jev-voice
 ```
 
-Run from this repository so the server can load `.env`. Transcription uses
-`gpt-transcribe`. Set `OPENAI_API_KEY`, or reuse `TEXT_MODEL_API_KEY` when
+Run from this repository so the server can load `.env`. Push-to-talk transcription uses
+`gpt-transcribe`; continuous mode uses `gpt-live-transcribe`. Set `OPENAI_API_KEY`, or reuse `TEXT_MODEL_API_KEY` when
 `TEXT_MODEL_BASE_URL` points to `https://api.openai.com/v1`. The existing
 `TYPESAFE_API_KEY` and text-model settings are still needed. API keys stay in Python.
 The server listens only on `127.0.0.1:8767`; it accepts extension origins and requires
@@ -183,6 +184,7 @@ The loopback transport assumes a trusted local OS; it is not intended for remote
 
 | Operation | Trigger |
 | --- | --- |
+| Toggle continuous listening | **⌘ + Shift + J** while the web page has focus |
 | Hold to speak, release to execute | **⌘ + Shift + I** while the web page has focus |
 | Stop a running task | **Esc** in the web page |
 | Open pairing and microphone settings | Click the Jev Voice extension icon |
@@ -190,20 +192,22 @@ The loopback transport assumes a trusted local OS; it is not intended for remote
 
 The confirmed transcript appears beneath the status as **指示：…**, including for
 15 seconds after stopping. Settings also shows **直近の指示** for the current browser
-session. Starting another recording clears the on-page transcript until the next
-instruction is recognized.
+session. Starting another session clears the on-page transcript until the next
+instruction is recognized. Continuous mode also shows the current goal and partial
+transcript, and restores the display after same-tab navigation.
 
 Wait for **録音中** before speaking; microphone startup is not instantaneous. The
 hold shortcut is implemented by a content script, so it doesn't work in the address
-bar, browser-internal pages, or cross-origin frames. There is only one recording
-shortcut, implemented as a page key listener rather than a browser command. Page blur
-or navigation cancels a recording; navigation after committing an instruction is
-allowed. Recording is limited to 30 seconds and a run to 120 seconds / the existing
-60-action budget. Cancellation prevents subsequent commands; it cannot undo an
+bar, browser-internal pages, or cross-origin frames. The shortcuts are page key listeners rather than browser commands. In push-to-talk,
+page blur or navigation cancels recording; navigation after committing is allowed.
+Push-to-talk recording is limited to 30 seconds and a run to 120 seconds.
+Continuous mode keeps recording through same-tab navigation, with a 10-minute
+session limit. Both retain the 60-action / 120-decision budget for the whole session;
+updating a goal does not reset it. Cancellation prevents subsequent commands; it cannot undo an
 already-dispatched click or submission.
 
 Audio is sent incrementally over an authenticated local WebSocket, then upstream
-to OpenAI. Releasing the key flushes the final audio chunk and commits the turn;
+to OpenAI. In push-to-talk, releasing the key flushes the final audio chunk and commits the turn;
 `gpt-transcribe` starts transcription after commit. The confirmed transcript becomes
 the original goal with no extra planning model. The existing TypeSafe operation and
 operation-specific target selection, TYPE_TEXT helper, stale guards, and execution
@@ -211,13 +215,16 @@ history remain in use. The extension uses `chrome.debugger` for browser input, s
 Chromium displays a debugging notice while attached. No remote-debugging browser
 flag or Browser Harness connection is needed for the extension.
 
-Visible page information goes to TypeSafe and, when typing, the configured text
-model. The extension doesn't receive provider credentials. It stores only its local
+Visible page information goes to TypeSafe and the configured text model (for
+field generation and, in continuous mode, intent interpretation). Continuous
+transcription also receives up to 40 observed control labels as vocabulary hints;
+input values and page-body text are not included in those hints. Labels themselves
+can contain personal information. The extension doesn't receive provider credentials. It stores only its local
 pairing token and selected microphone, plus the latest status and transcript in
 browser-session memory; the voice bridge doesn't save recordings or
 traces. Failed runs log only the stage, error code, audio duration/peak level, and
-transcript length; they do not log audio or transcript contents. Goal completion is a model decision, so the final notification asks the user
-to check the outcome instead of claiming independently verified success.
+transcript length and call/discard counts; they do not log audio or transcript contents.
+Push-to-talk completion remains a model decision and asks the user to check the outcome.
 
 Scope: ordinary HTML / ARIA controls and same-tab HTTP(S) navigation, including
 cross-origin navigation. Iframes, shadow DOM, canvas, file uploads, nested scrolling,
@@ -225,6 +232,38 @@ and continuing in a newly opened tab are outside this MVP. Borrowed tabs keep th
 viewport and link targets unchanged. If a link activates a new tab, the original run
 stops rather than moving to it. Opening DevTools or revoking debugger access can
 interrupt the run; uncertain input is never automatically repeated.
+
+### Continuous goals
+
+Press **⌘ + Shift + J**, wait for **連続録音中**, and speak normally. Pauses of about
+650 ms let the local PCM energy/silence detector commit a turn. Confirmed utterances are interpreted by
+`INTENT_MODEL` (defaults to `TEXT_MODEL`, e.g. Luna) with a structured goal patch.
+The existing `TEXT_MODEL_API_KEY` and base URL are reused. Each nonempty finalized
+utterance adds one intent-model request; browser decisions and field-text calls
+remain separate. The historical flight timings above do not cover this mode.
+
+- Add a condition or correct one: retain other conditions, invalidate old decisions
+  and generated field text, then reobserve and work toward the latest goal.
+- Ask for a different task: replace the active goal and discard its queued follow-ups.
+  An explicit “after that” queues a separate goal until the current one is verified.
+- Say stop/pause: interpretation pauses execution while the microphone stays open.
+  Say resume or provide a revised goal to continue. **Esc**, another **⌘ + Shift + J**,
+  tab switch or window-focus loss closes the entire session.
+- Local speech detection immediately suspends new commands while interpretation is pending.
+  Already-dispatched input cannot be undone. An interruption partway through a multi-command
+  browser action ends the session without replaying the action; start a new session afterward.
+- `DONE` triggers a fresh observation and code checks of the goal's expected URL,
+  visible result text, or uniquely labelled control values/checked state. All purpose
+  and condition checks must pass. Missing, ambiguous or failed checks produce
+  **確認待ち**, not success; queued work stays pending. Checks are proposed by the
+  intent model, so their semantic coverage is not a general correctness guarantee.
+- Verified completion stops browser work but retains the goal and microphone for
+  another instruction. It does not continuously enforce conditions after completion.
+
+Partial transcripts are displayed but **never authorize browser mutations**. This
+implements the plan's finalized-utterance stage. Executing clauses before an utterance
+finishes remains a separate improvement requiring negation/correction evaluation.
+See [continuous voice design and evidence](docs/continuous-voice.md).
 
 ### Voice verification
 
@@ -237,7 +276,9 @@ The latter launches **isolated headless Brave** with the real unpacked extension
 a fake microphone, a local fixture, and offline transcription/model substitutes.
 It checks actual page navigation, text input, application of the value, the end
 notification, preservation of the tab, early key release, Esc cancellation, and
-cancellation during model latency when switching tabs. It doesn't touch a personal browser
+cancellation during model latency when switching tabs. It also checks continuous
+recording through navigation, retained goal display, post-completion corrections,
+old-decision rejection during model latency, and spoken pause. It doesn't touch a personal browser
 profile or call paid APIs. Real-microphone Japanese recognition, live provider
 availability, and end-to-end latency must be evaluated separately; existing flight
 demo timing does not include voice input.
