@@ -456,7 +456,8 @@ def continuous(bridge):
                 bridge.diagnostics["intent_calls"] = bridge.diagnostics.get("intent_calls", 0) + 1
                 with goals.lock:
                     bridge.send({"type": "goal", "revision": goals.revision, "goal": goals.goal,
-                                 "state": goals.status, "question": goals.question})
+                                 "state": goals.status,
+                                 "question": goals.question if goals.status == "clarification" else ""})
         except Exception as error:
             worker_failed(error)
 

@@ -25,7 +25,11 @@ Within one Python session:
    utterances, last page and actual actions to the intent model. It returns a typed patch:
    new, amend, enqueue, pause, resume or clarify. The patch echoes the base revision and
    source item. `Goals` validates it and applies it atomically. Omitted conditions survive;
-   conditions with matching IDs are replaced. Failed validation stops the session.
+   conditions with matching IDs are replaced. Pending clarification retains the exact displayed
+   question and original request; a bounded user/assistant dialogue accompanies the next
+   utterance so brief answers can be resolved against it. Repeated questions preserve the
+   original request. Pause/resume cannot bypass an unanswered question; a resolved patch
+   or an explicitly new task clears it. Failed validation stops the session.
 5. The main thread is the sole owner of the browser and agent. It checks the input epoch
    around decisions/text generation and before each RPC. Updating the goal clears the
    decision/text cache while retaining actual action history and session budgets.
