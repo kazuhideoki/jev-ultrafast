@@ -98,7 +98,9 @@ def interpret(context):
             "enqueue only for an explicit 'after that', pause for stop, resume for continue, clarify if ambiguous. "
             "When pending_clarification is present, interpret brief replies such as 'B', 'yes', 'the latter' "
             "or a name against its question, original_request and recent_dialogue, not as standalone tasks. "
-            "Resolve the original request using the answer: amend an existing goal, or new if there is no goal. "
+            "Resolve the original request using the answer and its original sequencing: enqueue for an explicit "
+            "after-that task, new for a replacement task (or no existing goal), amend for current-goal changes. "
+            "If the user has not answered the pending question, clarify rather than silently discarding it. "
             "Keep unrelated constraints. If the answer is still ambiguous, clarify again rather than guessing. "
             "Resume alone does not resolve an unanswered question. An explicitly different task may replace it. "
             "Without pending_clarification, do not treat an old question in recent_dialogue "
@@ -217,10 +219,13 @@ class Goals:
                 if len(conditions) > 20:
                     raise ValueError("Too many conditions")
                 candidate["conditions"] = list(conditions.values())
-            if mode == "enqueue" and self.goal and self.status not in {"completed", "listening"}:
+            prior_status = (self.clarification["prior_status"]
+                            if self.status == "clarification" and self.clarification else self.status)
+            if mode == "enqueue" and self.goal and prior_status not in {"completed", "listening"}:
                 if len(self.queue) >= 10:
                     raise ValueError("Goal queue full")
                 self.queue.append(candidate)
+                self.status = prior_status
             elif mode in {"new", "amend", "enqueue"}:
                 if self.goal:
                     self.history.append({"revision": self.revision, "goal": self.goal,
@@ -236,12 +241,15 @@ class Goals:
             if mode == "clarify":
                 self.question = question.strip()[:500]
                 self.clarification = {
-                    **(self.clarification or {"original_request": text, "utterance_id": item_id}),
+                    **(self.clarification or {"original_request": text, "utterance_id": item_id,
+                                             "prior_status": prior_status}),
                     "question": self.question, "revision": self.revision + 1,
                 }
-            elif mode in {"new", "amend"} or (mode == "enqueue" and self.status == "running"):
+            elif mode in {"new", "amend", "enqueue"}:
                 self.question = ""
                 self.clarification = None
+            elif mode == "pause" and self.clarification:
+                self.clarification["prior_status"] = "paused"
             self.dialogue.append({"role": "user", "content": text})
             if mode == "clarify":
                 self.dialogue.append({"role": "assistant", "content": self.question})

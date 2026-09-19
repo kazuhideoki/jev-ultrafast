@@ -25,6 +25,7 @@ from .intent import Goals, Superseded, context_page, interpret, vocabulary
 
 PORT = 8767
 MAX_SECONDS = 600
+TRANSCRIPT_TIMEOUT_SECONDS = 30
 
 
 class VoiceError(ValueError):
@@ -317,6 +318,7 @@ def stream_transcripts(bridge, goals, output):
         errors = queue.Queue()
         committed_items = queue.Queue()
         remote_items = {}
+        awaiting_finals = {}
         upstream.send(json.dumps({"type": "session.update", "session": {
             "type": "transcription", "audio": {"input": {
                 "format": {"type": "audio/pcm", "rate": 24000},
@@ -347,6 +349,8 @@ def stream_transcripts(bridge, goals, output):
                         upstream.send(json.dumps({"type": "input_audio_buffer.append",
                                                   "audio": base64.b64encode(chunk).decode()}))
                     if committed:
+                        with goals.lock:
+                            awaiting_finals[local_item] = time.monotonic()
                         committed_items.put(local_item)
                         upstream.send(json.dumps({"type": "input_audio_buffer.commit"}))
                     with goals.lock:
@@ -368,6 +372,12 @@ def stream_transcripts(bridge, goals, output):
                 bridge.check()
                 if not errors.empty():
                     raise errors.get_nowait()
+                with goals.lock:
+                    if any(time.monotonic() - since > TRANSCRIPT_TIMEOUT_SECONDS
+                           for since in awaiting_finals.values()):
+                        raise VoiceError(
+                            "transcription_timeout", "文字起こしの応答が途絶えました。再接続してください。"
+                        )
                 try:
                     event = json.loads(upstream.recv(timeout=0.1))
                 except TimeoutError:
@@ -404,7 +414,10 @@ def stream_transcripts(bridge, goals, output):
                     text = finals.pop(item)
                     partials.pop(item, None)
                     delivered.add(item)
-                    output.put_nowait((remote_items.pop(item, item), text))
+                    local = remote_items.pop(item, item)
+                    with goals.lock:
+                        awaiting_finals.pop(local, None)
+                    output.put_nowait((local, text))
                 if len(order) + len(finals) + len(partials) > 100:
                     raise ValueError("Unresolved transcription backlog")
         finally:

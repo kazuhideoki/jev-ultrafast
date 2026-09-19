@@ -121,3 +121,19 @@ configuration and keyword updates succeed with `turn_detection: null`.
 Local PCM segmentation now supplies explicit commits and gates execution as soon
 as speech is detected. Provider errors are mapped to safe, actionable error codes
 instead of being collapsed into an unexplained RuntimeError.
+
+## Independent review follow-ups
+
+- A clarified queued task now restores the active goal's prior state instead of
+  remaining stuck in clarification; the interpreter preserves the original
+  new/amend/after-that intent when resolving short answers.
+- Capture track end/mute, AudioContext interruption and worklet errors stop the
+  extension immediately. A two-second PCM heartbeat gap also stops it. Intentional
+  recording release does not trigger a false capture failure.
+- Committed turns have a 30-second final-response deadline. A missing final fails
+  the session explicitly instead of silently holding later instructions until
+  the ten-minute session deadline. Two real local PCM segments through the actual
+  streaming loop are covered offline with reversed finals and a missing first final.
+
+Live multi-turn microphone/provider semantics remain unmeasured; configuration
+acceptance and offline protocol coverage do not establish live recognition quality.

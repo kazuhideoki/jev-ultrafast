@@ -62,3 +62,37 @@ function send(message, sender) {
     # vm code deliberately uses the real background.js; no extension implementation is copied.
     script = script.replace("vm.runInThisContext", "global.chrome = chrome; vm.runInThisContext")
     subprocess.run(["node", "-e", script], cwd=ROOT, check=True, timeout=10, capture_output=True, text=True)
+
+
+def test_capture_health_stops_session_and_ignores_intentional_release():
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+let now = 0, timer;
+const notices = [];
+const context = vm.createContext({
+  chrome: {runtime: {sendMessage: async event => notices.push(event), onMessage: {addListener() {}}}},
+  performance: {now: () => now},
+  setInterval: callback => {timer = callback; return 1;}, clearInterval() {}, clearTimeout() {},
+});
+vm.runInContext(fs.readFileSync('extension/offscreen.js', 'utf8'), context);
+for (const failure of ['ended', 'mute', 'context', 'processor', 'timeout', 'released']) {
+  const handlers = {};
+  let closed = 0, stopped = 0;
+  const track = {readyState:'live', muted:false, addEventListener:(k, v)=>handlers[k]=v, stop:()=>stopped++};
+  const session = {id:'fixture', stream:{getAudioTracks:()=>[track], getTracks:()=>[track]},
+    context:{state:'running', addEventListener:(k,v)=>handlers[k]=v, close:async()=>{}},
+    processor:{}, ws:{close:()=>closed++}};
+  context.fixture = session;
+  vm.runInContext('current = fixture; watchCapture(fixture)', context);
+  const before = notices.length;
+  if (failure === 'context') {session.context.state='suspended'; handlers.statechange();}
+  else if (failure === 'processor') session.processor.onprocessorerror();
+  else if (failure === 'timeout') {now += 2100; timer();}
+  else if (failure === 'released') {session.released=true; handlers.ended();}
+  else handlers[failure]();
+  assert.equal(notices.length, before + (failure === 'released' ? 0 : 1));
+  assert.equal(closed, failure === 'released' ? 0 : 1);
+  assert.equal(stopped, failure === 'released' ? 0 : 1);
+}
+'''
+    subprocess.run(["node", "-e", script], cwd=ROOT, check=True, timeout=10, capture_output=True, text=True)

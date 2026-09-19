@@ -17,9 +17,34 @@ function transmit(session, event) {
   }
 }
 async function release(session) {
+  session.released = true;
   clearTimeout(session.timer);
+  clearInterval(session.captureTimer);
   session.stream?.getTracks().forEach(track => track.stop());
   if (session.context && session.context.state !== 'closed') await session.context.close();
+}
+function watchCapture(session) {
+  const fail = () => {
+    if (current !== session || session.released || session.committed) return;
+    current = null;
+    // Notify immediately; background.finish gates RPCs before its first await.
+    void notify(session, {type: 'failed', text: 'マイク入力が停止したため操作を停止しました。再接続してください。'});
+    session.ws?.close();
+    void release(session);
+  };
+  for (const track of session.stream.getAudioTracks()) {
+    track.addEventListener('ended', fail);
+    track.addEventListener('mute', fail);
+  }
+  session.context.addEventListener('statechange', () => {
+    if (session.context.state !== 'running') fail();
+  });
+  session.processor.onprocessorerror = fail;
+  session.lastAudioAt = performance.now();
+  session.captureTimer = setInterval(() => {
+    if (performance.now() - session.lastAudioAt > 2000) fail();
+  }, 500);
+  if (session.stream.getAudioTracks().some(track => track.readyState !== 'live' || track.muted)) fail();
 }
 async function commit(session) {
   if (session.committed) return;
@@ -106,6 +131,7 @@ async function start(message) {
     processor.port.onmessage = event => {
       if (event.data === 'flushed') { session.flushed?.(); return; }
       if (current !== session || session.committed) return;
+      session.lastAudioAt = performance.now();
       const bytes = new Uint8Array(event.data.buffer);
       let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
       transmit(session, {type: 'audio', audio: btoa(binary)});
@@ -113,6 +139,8 @@ async function start(message) {
     source.connect(processor); processor.connect(session.context.destination);
     await session.context.resume();
     session.recording = true;
+    watchCapture(session);
+    if (current !== session) return;
     await notify(session, {type: 'recording'});
     if (!message.continuous) session.timer = setTimeout(() => { void notify(session, {type: 'failed', text: '録音は30秒以内にしてください'}); }, 30000);
     if (session.stopRequested) await commit(session);

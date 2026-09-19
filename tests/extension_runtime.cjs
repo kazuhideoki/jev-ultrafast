@@ -26,7 +26,7 @@ function runtime() {
     windows: {onFocusChanged: event},
     debugger: {attach: noop, detach: noop, sendCommand: async (...args) => {commands.push(args); return {};}, onDetach: event},
   };
-  const context = vm.createContext({chrome, setTimeout, clearTimeout, console});
+  const context = vm.createContext({chrome, setTimeout, clearTimeout, setInterval, clearInterval, console});
   vm.runInContext(source, context);
   return {chrome, context, commands, send: (msg, sender) => new Promise(resolve => listener(msg, sender, resolve))};
 }
@@ -72,7 +72,7 @@ for (const impostor of [
   }
   const context = vm.createContext({
     crypto: require('node:crypto').webcrypto, TextEncoder, Uint8Array, WebSocket,
-    setTimeout, clearTimeout,
+    setTimeout, clearTimeout, setInterval, clearInterval,
     chrome: {runtime: {
       onMessage: {addListener(fn) {listener = fn;}},
       sendMessage: async msg => {notices.push(msg);},

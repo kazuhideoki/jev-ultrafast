@@ -274,3 +274,30 @@ def test_empty_clarification_is_rejected_without_state_change():
     with pytest.raises(ValueError, match="requires a question"):
         goals.apply(patch(goals, "1", "clarify", question="  "), "1", "ambiguous")
     assert goals.revision == 0 and goals.dialogue == [] and goals.clarification is None
+
+
+def test_clarified_followup_restores_original_goal_then_advances():
+    goals = intent.Goals()
+    apply(goals, "1", purpose="Save report", checks=[{"kind": "text", "label": "", "expected": "Saved"}])
+    apply(goals, "after that open A or B", "clarify", question="A or B?")
+    apply(goals, "B", "enqueue", purpose="Open B")
+    assert goals.status == "running" and goals.task()[2] == "Save report"
+    assert goals.clarification is None and goals.question == ""
+    assert [g["purpose"] for g in goals.queue] == ["Open B"]
+    assert goals.finish(goals.epoch, "done", {"text": "Saved"}) == "running"
+    assert goals.task()[2] == "Open B" and goals.queue == []
+
+
+@pytest.mark.parametrize("status", ["completed", "paused", "awaiting_confirmation"])
+def test_clarified_followup_preserves_prior_execution_state(status):
+    goals = intent.Goals()
+    apply(goals, "1", purpose="Current")
+    goals.status = status
+    apply(goals, "next A or B", "clarify", question="A or B?")
+    apply(goals, "B", "enqueue", purpose="Open B")
+    assert goals.clarification is None
+    if status == "completed":
+        assert goals.task()[2] == "Open B"
+    else:
+        assert goals.status == status and goals.task() is None
+        assert goals.queue[0]["purpose"] == "Open B"
