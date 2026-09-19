@@ -111,7 +111,7 @@ def choose(state, goal, history):
             "page": {k: state[k] for k in ("url", "title", "text")},
             "elements": elements,
             "recent_actions": [
-                {k: h.get(k) for k in ("action", "kind", "text", "page_changed")} for h in history[-10:]
+                {k: h.get(k) for k in ("revision", "action", "kind", "text", "page_changed")} for h in history[-10:]
             ],
         },
         "questions": questions,
@@ -154,7 +154,7 @@ def field_context(goal, action, page, history):
         "goal": goal,
         "field": {k: action.get(k) for k in ("label", "role", "value")},
         "page": {"title": page["title"], "text": page["text"][:6000]},
-        "recent_actions": [{k: h.get(k) for k in ("action", "text")} for h in history[-6:]],
+        "recent_actions": [{k: h.get(k) for k in ("revision", "action", "text")} for h in history[-6:]],
     }
 
 

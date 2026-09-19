@@ -48,6 +48,19 @@ class Agent:
             self.record_dir.mkdir(parents=True, exist_ok=True)
             (self.record_dir / "000000.jpg").write_bytes(base64.b64decode(page["screenshot"]))
 
+    def update_goal(self, goal, revision):
+        """Called by the sole browser owner between ticks; keep executed history."""
+        if not isinstance(goal, str) or not goal.strip():
+            raise ValueError("Supply a task")
+        self.pending_text = None
+        self.state.update(goal=goal, revision=revision, decision=None, status="ready",
+                          stale_retries=0, error=None, plan=[goal], plan_index=0)
+
+    def check_goal(self):
+        guard = getattr(self, "goal_guard", None)
+        if guard:
+            guard()
+
     def snapshot(self):
         return {
             **{k: v for k, v in self.state.items() if k != "browser"},
@@ -90,14 +103,17 @@ class Agent:
             state["decision"] = None
             if len(state["decisions"]) >= MAX_STEPS * 2:
                 raise ValueError("Reached the demo's model-call budget")
+            self.check_goal()
             state["decision"] = choose(state["page"], state["goal"], state["history"])
             state["decisions"].append(
                 {
                     **state["decision"],
+                    "revision": state.get("revision", 0),
                     "fingerprint": state["page"]["fingerprint"],
                     "elapsed_ms": round((time.perf_counter() - state["started_at"]) * 1000),
                 }
             )
+            self.check_goal()
             state["status"] = "predicted"
         elif name == "act":
             decision, page = state["decision"], state["page"]
@@ -105,6 +121,7 @@ class Agent:
                 raise ValueError("Observe and choose before acting")
             # Consume once, before any mutation or model call. A retry cannot double-click.
             state["decision"] = None
+            self.check_goal()
             selected = decision["choice"]
             if selected in {"DONE", "BLOCKED"}:
                 if not state["browser"].fresh(page):
@@ -131,6 +148,7 @@ class Agent:
                     text, helper = field_text(context)
                     self.pending_text = (context, text, helper)
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
+            self.check_goal()
             # Browser.act checks freshness immediately before input, including after text generation.
             try:
                 state["browser"].act(action, page, text=text)
@@ -152,6 +170,7 @@ class Agent:
             # Record execution before observing. A stale post-action observation must not erase the action.
             state["history"].append(
                 {
+                    "revision": state.get("revision", 0),
                     "step": len(state["history"]) + 1,
                     "action": action["label"],
                     "kind": action["kind"],
@@ -182,7 +201,7 @@ class Agent:
                 (self.record_dir / f"{state['elapsed_ms']:06d}.jpg").write_bytes(
                     base64.b64decode(state["page"]["screenshot"])
                 )
-            repeated = state["history"][-3:]
+            repeated = [h for h in state["history"] if h.get("revision", 0) == state.get("revision", 0)][-3:]
             state["status"] = (
                 "blocked"
                 if len(repeated) == 3 and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)

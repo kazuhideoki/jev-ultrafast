@@ -162,6 +162,7 @@ class Browser:
         result = browser_operation({
             "operation": "act", "session": self.session, "action": action, "text": text,
             "owned": getattr(self, "owned", True),
+            "guarded_transport": getattr(self, "guarded_transport", False),
             **({"transport": self.transport} if getattr(self, "transport", None) else {}),
         })
         self.after_input = action if action["kind"] != "wait" else None
@@ -188,6 +189,11 @@ def browser_operation(request):
 
     def call(method, **params):
         if request.get("transport"):
+            if request.get("guarded_transport"):
+                mutation = operation == "act" and (
+                    method.startswith("Input.") or request["action"]["kind"] == "select"
+                )
+                return request["transport"](method, _mutation=mutation, **params)
             return request["transport"](method, **params)
         return cdp(method, session_id=session, **params)
 
@@ -195,7 +201,9 @@ def browser_operation(request):
         selecting = operation == "act" and request["action"]["kind"] == "select"
         try:
             result = call("Runtime.evaluate", expression=expression, returnByValue=True)
-        except Exception:
+        except Exception as error:
+            if getattr(error, "before_dispatch", False):
+                raise
             if selecting:
                 raise dropdown_failure(request["action"], "evaluation_response_lost", None) from None
             raise

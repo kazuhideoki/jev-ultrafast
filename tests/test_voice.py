@@ -74,6 +74,7 @@ def test_transcription_commits_after_all_audio(monkeypatch, transcript, code):
     class Upstream:
         def __init__(self):
             self.sent = []
+            self.commits = 0
 
         def __enter__(self):
             return self
@@ -150,3 +151,114 @@ def test_mutual_pairing_proves_both_roles_without_sending_token():
 
     assert voice.authenticate(Socket(), token)
     assert voice.pairing_proof(token, "client", "a", "b") != voice.pairing_proof(token, "server", "a", "b")
+
+
+def test_local_turns_buffer_prefix_and_commit_once_after_silence():
+    import struct
+
+    quiet = bytes(4800)
+    speech = struct.pack('<2400h', *([1200] * 2400))
+    turns = voice.AudioTurns()
+    for _ in range(20):
+        assert turns.feed(quiet) == (False, b'', False)
+    started, chunk, committed = turns.feed(speech)
+    assert started and len(chunk) == 14400 + 4800 and not committed
+    for _ in range(6):
+        assert turns.feed(quiet)[2] is False
+    assert turns.feed(quiet)[2] is True
+    assert turns.feed(quiet) == (False, b'', False)
+    assert turns.feed(speech)[0] is True
+
+
+def test_local_turn_too_long_stops_without_partial_commit():
+    import struct
+
+    speech = struct.pack('<2400h', *([1200] * 2400))
+    turns = voice.AudioTurns()
+    for _ in range(300):
+        assert turns.feed(speech)[2] is False
+    with pytest.raises(voice.VoiceError, match='30秒'):
+        turns.feed(speech)
+
+
+@pytest.mark.parametrize("missing_final", [False, True])
+def test_live_transcription_reconciles_multiple_pcm_turns(monkeypatch, missing_final):
+    import struct
+
+    from jev_ultrafast.intent import Goals
+
+    bridge = bridge_without_reader()
+    bridge.events = queue.Queue()
+    bridge.diagnostics = {}
+    goals = Goals()
+    output = queue.Queue()
+    for audio in [struct.pack('<2400h', *([1200] * 2400)), *([bytes(4800)] * 8)] * 2:
+        bridge.events.put({'type': 'audio', 'audio': base64.b64encode(audio).decode()})
+    original_check = bridge.check
+
+    def check():
+        original_check()
+        if output.qsize() == 2:
+            raise RuntimeError('fixture complete')
+
+    bridge.check = check
+
+    class Upstream:
+        def __init__(self):
+            self.events = queue.Queue()
+            self.sent = []
+            self.commits = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def close(self):
+            bridge.closed.set()
+
+        def send(self, raw):
+            event = json.loads(raw)
+            self.sent.append(event)
+            if event['type'] == 'input_audio_buffer.commit':
+                self.commits += 1
+                self.events.put({'type': 'input_audio_buffer.committed', 'item_id': f'remote-{self.commits}'})
+                if self.commits == 2:
+                    for n in ([2] if missing_final else [2, 1]):
+                        self.events.put({'type': 'conversation.item.input_audio_transcription.completed',
+                                         'item_id': f'remote-{n}', 'transcript': f'Instruction {n}'})
+
+        def recv(self, timeout):
+            try:
+                return json.dumps(self.events.get(timeout=timeout))
+            except queue.Empty:
+                raise TimeoutError() from None
+
+    upstream = Upstream()
+    monkeypatch.setattr(voice, 'connect', lambda *a, **kw: upstream)
+    monkeypatch.setattr(voice, 'openai_key', lambda: 'offline')
+    if missing_final:
+        monkeypatch.setattr(voice, 'TRANSCRIPT_TIMEOUT_SECONDS', 0.05)
+        with pytest.raises(voice.VoiceError) as error:
+            voice.stream_transcripts(bridge, goals, output)
+        assert error.value.code == 'transcription_timeout'
+        assert output.empty()
+    else:
+        with pytest.raises(RuntimeError, match='fixture complete'):
+            voice.stream_transcripts(bridge, goals, output)
+        items = [output.get_nowait(), output.get_nowait()]
+        assert [text for _, text in items] == ['Instruction 1', 'Instruction 2']
+        assert all(item in goals.pending and not item.startswith('remote-') for item, _ in items)
+        assert len({item for item, _ in items}) == 2
+    assert upstream.sent[0]['session']['audio']['input']['turn_detection'] is None
+    assert sum(e['type'] == 'input_audio_buffer.commit' for e in upstream.sent) == 2
+    assert goals.epoch == 2
+
+
+def test_transcription_rejection_has_actionable_safe_error():
+    error = voice.transcription_error({'error': {
+        'code': 'invalid_value', 'message': 'secret echoed page text',
+    }})
+    assert error.code == 'transcription_config'
+    assert 'secret' not in str(error)

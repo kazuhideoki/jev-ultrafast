@@ -1,13 +1,50 @@
 let current;
 const notify = (session, event) => chrome.runtime.sendMessage({target: 'background', runId: session.id, ...event});
 function transmit(session, event) {
-  if (session.authenticated && session.ws.readyState === WebSocket.OPEN) session.ws.send(JSON.stringify(event));
-  else session.pending.push(event);
+  if (session.authenticated && session.ws.readyState === WebSocket.OPEN) {
+    if (session.ws.bufferedAmount > 1048576) {
+      void notify(session, {type: 'failed', text: '音声送信が滞っています。再接続してください。'});
+      return;
+    }
+    session.ws.send(JSON.stringify(event));
+  }
+  else {
+    if (session.pending.length >= 100) {
+      void notify(session, {type: 'failed', text: '接続待ちが長すぎます。再接続してください。'});
+      return;
+    }
+    session.pending.push(event);
+  }
 }
 async function release(session) {
+  session.released = true;
   clearTimeout(session.timer);
+  clearInterval(session.captureTimer);
   session.stream?.getTracks().forEach(track => track.stop());
   if (session.context && session.context.state !== 'closed') await session.context.close();
+}
+function watchCapture(session) {
+  const fail = () => {
+    if (current !== session || session.released || session.committed) return;
+    current = null;
+    // Notify immediately; background.finish gates RPCs before its first await.
+    void notify(session, {type: 'failed', text: 'マイク入力が停止したため操作を停止しました。再接続してください。'});
+    session.ws?.close();
+    void release(session);
+  };
+  for (const track of session.stream.getAudioTracks()) {
+    track.addEventListener('ended', fail);
+    track.addEventListener('mute', fail);
+  }
+  session.context.addEventListener('statechange', () => {
+    if (session.context.state !== 'running') fail();
+  });
+  session.processor.onprocessorerror = fail;
+  session.lastAudioAt = performance.now();
+  session.captureTimer = setInterval(() => {
+    if (performance.now() - session.lastAudioAt > 2000) fail();
+  }, 500);
+  if (session.stream.getAudioTracks().some(track => track.readyState !== 'live' || track.muted)) fail();
 }
 async function commit(session) {
   if (session.committed) return;
@@ -59,11 +96,16 @@ async function start(message) {
           if (data.type !== 'ready') throw new Error('Pairing not completed');
           session.authenticated = true;
           handshake = 'authenticated';
+          transmit(session, {type: 'start', continuous: message.continuous === true});
           for (const pending of session.pending) transmit(session, pending);
           session.pending = [];
           return;
         }
-        await notify(session, data);
+        if (data.type === 'rpc') {
+          // Let later gate events overtake a command waiting on browser attachment/focus.
+          // The browser owner still has only one outstanding RPC.
+          void notify(session, data).catch(() => session.ws.close());
+        } else await notify(session, data);
       }).catch(async () => {
         if (current !== session) return;
         current = null;
@@ -89,6 +131,7 @@ async function start(message) {
     processor.port.onmessage = event => {
       if (event.data === 'flushed') { session.flushed?.(); return; }
       if (current !== session || session.committed) return;
+      session.lastAudioAt = performance.now();
       const bytes = new Uint8Array(event.data.buffer);
       let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte);
       transmit(session, {type: 'audio', audio: btoa(binary)});
@@ -96,8 +139,10 @@ async function start(message) {
     source.connect(processor); processor.connect(session.context.destination);
     await session.context.resume();
     session.recording = true;
+    watchCapture(session);
+    if (current !== session) return;
     await notify(session, {type: 'recording'});
-    session.timer = setTimeout(() => { void notify(session, {type: 'failed', text: '録音は30秒以内にしてください'}); }, 30000);
+    if (!message.continuous) session.timer = setTimeout(() => { void notify(session, {type: 'failed', text: '録音は30秒以内にしてください'}); }, 30000);
     if (session.stopRequested) await commit(session);
   } catch (_) {
     if (current === session) await notify(session, {type: 'failed', text: 'マイクまたは接続を開始できません。拡張の設定画面を確認してください。'});
