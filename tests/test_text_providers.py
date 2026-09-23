@@ -18,7 +18,7 @@ def test_openai_luna_from_env_file(monkeypatch, tmp_path, effort):
     (tmp_path / ".env").write_text(
         "TEXT_MODEL_API_KEY=offline-test\n"
         "TEXT_MODEL_BASE_URL=https://api.openai.com/v1/\n"
-        "TEXT_MODEL=gpt-5.6-luna\n"
+        "TEXT_MODEL=gpt-6-luna\n"
         f"TEXT_MODEL_REASONING={effort}\n"
     )
     load_environment()
@@ -27,7 +27,7 @@ def test_openai_luna_from_env_file(monkeypatch, tmp_path, effort):
         assert str(request.url) == "https://api.openai.com/v1/chat/completions"
         assert request.headers["authorization"] == "Bearer offline-test"
         body = json.loads(request.content)
-        assert body["model"] == "gpt-5.6-luna"
+        assert body["model"] == "gpt-6-luna"
         assert body["reasoning_effort"] == effort
         assert body["max_completion_tokens"] == 1024
         assert "max_tokens" not in body

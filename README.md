@@ -61,12 +61,12 @@ Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. T
 
 Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. In Brave, open `brave://inspect/#remote-debugging` and enable **Allow remote debugging for this browser instance**. In Chrome, use `chrome://inspect/#remote-debugging`. Rerun the command and allow the connection prompt. This grants Browser Harness access to that browser profile. If startup reports `DevToolsActivePort not found`, this setting is missing.
 
-The example configuration uses [OpenAI GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna) for field text. Set these values in `.env` and restart `uv run jev` after changes:
+The example configuration uses [OpenAI GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) for field text. Set these values in `.env` and restart `uv run jev` after changes:
 
 ```dotenv
 TEXT_MODEL_API_KEY=
 TEXT_MODEL_BASE_URL=https://api.openai.com/v1
-TEXT_MODEL=gpt-5.6-luna
+TEXT_MODEL=gpt-6-luna
 TEXT_MODEL_REASONING=none
 ```
 
